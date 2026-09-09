@@ -148,6 +148,7 @@ class DetailConnection:
         if any(table in sql for table in (
             "from sms_messages", "from call_logs", "from appointments",
             "from lead_status_history", "from lead_message_overrides",
+            "from dashboard_audit_log",
         )):
             return Result([])
         raise AssertionError(sql)

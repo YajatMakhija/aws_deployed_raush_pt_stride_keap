@@ -612,6 +612,15 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
             "where lead_id=%s order by changed_at desc limit 100",
             (lead_id,),
         ).fetchall()
+        # Pause and resume are only in the audit log, but the cadence view has to
+        # show them: after a pause every overdue step fires in one tick, and a
+        # burst of four steps at one timestamp is unreadable without the reason.
+        cadence_actions = conn.execute(
+            "select action,created_at from dashboard_audit_log where entity_type='lead' "
+            "and entity_id=%s and action in ('cadence.pause','cadence.resume') "
+            "order by created_at",
+            (str(lead_id),),
+        ).fetchall()
         overrides = conn.execute(
             "select lmo.message_template_id,lmo.body,lmo.updated_at from lead_message_overrides lmo "
             "where lmo.lead_id=%s",
@@ -661,6 +670,7 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
         "calls": calls,
         "appointments": appointments,
         "history": status_history,
+        "cadence_actions": cadence_actions,
         "message_overrides": overrides,
         "cadence_version": version_payload,
     }
