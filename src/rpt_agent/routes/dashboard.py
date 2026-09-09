@@ -189,7 +189,10 @@ def _stage(row: dict) -> str:
 
 
 CLOSED_REASON = {
-    "declined": "Patient declined",
+    # 'declined' is only ever reached from a not_interested call outcome, and
+    # maps straight back to it. Saying "declined" made staff look for a
+    # different event than the one that happened.
+    "declined": "Not interested",
     "transferred_human": "Transferred to staff",
     "booking_link_sent": "Booking link sent",
     "do_not_contact": "Do not contact",
