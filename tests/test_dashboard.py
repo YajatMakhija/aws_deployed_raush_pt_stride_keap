@@ -116,6 +116,15 @@ class DetailConnection:
                 "owner": "Test Owner",
                 "is_test": True,
             }])
+        # The pinned-version lookup selects from cadence_versions but reaches
+        # into outreach_events for the id, so it has to be matched first.
+        if sql.startswith("select id,name,version_number,status,lead_id from cadence_versions"):
+            return Result([{
+                "id": 3, "name": "Standard v3", "version_number": 3, "status": "active",
+                "lead_id": None, "practice_id": 1, "source_version_id": None,
+                "activated_at": datetime.now(UTC), "created_at": datetime.now(UTC),
+                "updated_at": datetime.now(UTC),
+            }])
         if "from outreach_events oe" in sql:
             return Result([
                 {"id": 1, "cadence_step_id": 1, "cadence_version_id": 3,

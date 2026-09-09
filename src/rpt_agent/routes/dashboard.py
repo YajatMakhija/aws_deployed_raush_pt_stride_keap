@@ -355,9 +355,17 @@ def dashboard_snapshot(actor: Actor):
             "next_event.id as next_event_id,next_event.status as next_event_status,"
             "next_event.description as next_step,next_event.channel as next_channel,"
             "next_event.scheduled_for as next_scheduled_for from leads l left join lateral ("
-            "select cv.id,cv.name from cadence_versions cv where cv.practice_id=l.practice_id "
-            "and cv.status='active' and (cv.lead_id=l.id or cv.lead_id is null) "
-            "order by (cv.lead_id is not null) desc limit 1"
+            # The version stamped on the lead's own schedule, not whichever is
+            # active for the practice. Leads stay pinned to the version they
+            # started on, so reading the practice default named a cadence the
+            # lead was not on and counted progress against events that did not
+            # exist -- every mid-cadence lead read "0 of 0".
+            "select cv.id,cv.name from cadence_versions cv where cv.id=coalesce("
+            "(select oe2.cadence_version_id from outreach_events oe2 where oe2.lead_id=l.id "
+            "and oe2.cadence_version_id is not null order by oe2.created_at desc,oe2.id desc limit 1),"
+            "(select cv2.id from cadence_versions cv2 where cv2.practice_id=l.practice_id "
+            "and cv2.status='active' and (cv2.lead_id=l.id or cv2.lead_id is null) "
+            "order by (cv2.lead_id is not null) desc limit 1))"
             ") current_version on true left join lateral ("
             "select oe.id,cs.description,oe.channel,oe.scheduled_for,oe.status from outreach_events oe "
             "left join cadence_steps cs on cs.id=oe.cadence_step_id where oe.lead_id=l.id "
@@ -580,12 +588,22 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="lead not found")
-        current_version = conn.execute(
+        # What the practice would give a new lead today.
+        global_version = conn.execute(
             "select id,name,version_number,status,lead_id from cadence_versions "
             "where practice_id=%s and status='active' and (lead_id=%s or lead_id is null) "
             "order by (lead_id is not null) desc limit 1",
             (row["practice_id"], lead_id),
         ).fetchone()
+        # What this lead is actually running. A lead keeps the version it started
+        # on, so these differ whenever a new cadence was activated mid-outreach,
+        # and the record has to say which one governs this patient.
+        current_version = conn.execute(
+            "select id,name,version_number,status,lead_id from cadence_versions where id=("
+            "select oe.cadence_version_id from outreach_events oe where oe.lead_id=%s "
+            "and oe.cadence_version_id is not null order by oe.created_at desc,oe.id desc limit 1)",
+            (lead_id,),
+        ).fetchone() or global_version
         events = conn.execute(
             # sm.delivery_status is the only honest answer for an SMS step. An
             # outreach_event reaching 'delivered' only means Twilio accepted the
@@ -648,6 +666,13 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
     detail["cadence_progress"] = sum(event["status"] != "planned" for event in current_events)
     detail["cadence_total"] = len(current_events)
     detail["cadence_version_name"] = current_version["name"] if current_version else None
+    # Only set when the practice has moved on, so the UI can offer a deliberate
+    # migration rather than silently implying the lead is on the newest plan.
+    detail["global_version_name"] = (
+        global_version["name"]
+        if global_version and current_version and global_version["id"] != current_version["id"]
+        else None
+    )
     next_event = next((event for event in events if event["status"] == "planned"), None)
     if not next_event:
         next_event = next(
