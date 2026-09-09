@@ -391,9 +391,23 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
                 "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
                 ("stale Stride booking requires reconciliation", row["lead_id"]),
             )
+        # A cadence is spent when nothing is left to send and nothing is still
+        # out with a provider -- not when the calendar says so. The old rule also
+        # required cadence_started_on+14 days, which described the standard
+        # cadence rather than the one the lead is actually on: a compressed test
+        # run stayed 'active' for a fortnight with an empty schedule, and a real
+        # lead whose last step falls on day 13 waited an extra day to close.
+        #
+        # Leaving those leads active is not cosmetic. Activating a cadence
+        # version replans every lead that is active or paused, so a finished
+        # lead would be dialled again from day 0.
+        #
+        # Deliberately no reference to test mode: the same condition is correct
+        # whether the cadence took thirteen minutes or thirteen days.
         exhausted = conn.execute(
             "update leads l set status='closed_no_response',cadence_state='completed',status_changed_at=now() "
-            "where l.cadence_state='active' and l.cadence_started_on+14<=current_date "
+            "where l.cadence_state='active' "
+            "and exists(select 1 from outreach_events oe where oe.lead_id=l.id) "
             "and not exists(select 1 from outreach_events oe where oe.lead_id=l.id "
             "and oe.status in ('planned','in_flight','attempted')) returning id"
         ).fetchall()

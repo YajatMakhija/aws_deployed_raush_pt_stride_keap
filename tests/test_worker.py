@@ -183,3 +183,36 @@ def test_version_lookup_types_its_optional_parameter():
     version_query = version_query[: version_query.index("order by")]
     assert "%s::bigint is null" in version_query
     assert "id=%s::bigint" in version_query
+
+
+def test_cadence_completion_does_not_depend_on_the_calendar():
+    """The same rule must close a 13-minute run and a 13-day one.
+
+    The previous condition required cadence_started_on + 14 days, which
+    described the standard cadence rather than the one the lead is on. A
+    compressed test run stayed 'active' with an empty schedule, and a real
+    lead finishing on day 13 waited an extra day.
+
+    That mattered beyond tidiness: activating a cadence version replans every
+    active or paused lead, so a finished one would be dialled again from day 0.
+
+    Asserted on the statement because the sweep is a single UPDATE against the
+    database, and the point is precisely that it carries no time term.
+    """
+    import inspect
+
+    from rpt_agent import worker
+
+    source = inspect.getsource(worker.run_safety_checks)
+    start = source.index("update leads l set status='closed_no_response'")
+    statement = source[start : source.index("returning id", start)]
+
+    # No calendar arithmetic of any kind: no day count, no now(), no current_date.
+    assert "cadence_started_on" not in statement
+    assert "current_date" not in statement
+    assert "interval" not in statement
+
+    # Complete exactly when the lead has events and none are outstanding.
+    assert "exists(select 1 from outreach_events oe where oe.lead_id=l.id)" in statement
+    assert "and oe.status in ('planned','in_flight','attempted')" in statement
+    assert "l.cadence_state='active'" in statement
