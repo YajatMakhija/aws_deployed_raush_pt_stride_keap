@@ -784,6 +784,20 @@ def delete_dashboard_lead(lead_id: UUID, actor: Actor):
             "select count(*) as total from outreach_events where lead_id=%s", (lead_id,)
         ).fetchone()["total"]
 
+        # A lead with a personalised cadence needs that unwound by hand. Deleting
+        # the lead cascades into its cadence_versions row, but three tables hold
+        # that row with RESTRICT -- cadence_steps, message_templates and
+        # outreach_events -- so the cascade is refused and the whole delete fails.
+        # Clearing the events first is what frees the version to go.
+        conn.execute("delete from outreach_events where lead_id=%s", (lead_id,))
+        lead_versions = "select id from cadence_versions where lead_id=%s"
+        for table in ("message_templates", "cadence_steps"):
+            conn.execute(
+                f"delete from {table} where cadence_version_id in ({lead_versions})", (lead_id,)
+            )
+        cursor = conn.execute("delete from cadence_versions where lead_id=%s", (lead_id,))
+        removed["personal_cadence_versions"] = cursor.rowcount
+
         # Audit before the row goes: the log keeps ids as text, so it survives.
         _audit(
             conn,
