@@ -94,6 +94,23 @@ def process_pending_integrations(
                     "updated_at=now() where id=%s",
                     (sid, row["id"]),
                 )
+                # notification_log is the outbox -- retries, attempts, next
+                # attempt. sms_messages is the conversation the patient sees,
+                # and it is what the dashboard reads. Writing only the first
+                # left a hole: we texted someone a booking link and their
+                # thread showed nothing, so a reply arrived with no outbound
+                # message above it.
+                #
+                # Same sid in both, which the Twilio status webhook already
+                # matches on (sms_messages.provider_message_id and
+                # notification_log.provider_ref), so delivery status tracks
+                # itself with no extra work.
+                conn.execute(
+                    "insert into sms_messages(lead_id,direction,body,occurred_at,delivery_status,"
+                    "provider_message_id) values(%s,'outbound',%s,now(),'queued',%s) "
+                    "on conflict (provider_message_id) do nothing",
+                    (row["lead_id"], body, sid),
+                )
             if providers.settings.mode("twilio") == "real":
                 try:
                     with transaction() as conn:
