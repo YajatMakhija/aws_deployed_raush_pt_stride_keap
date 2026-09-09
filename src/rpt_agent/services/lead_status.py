@@ -267,10 +267,17 @@ def report_lead_status(
             # Nothing should reach the patient before the callback they were promised,
             # so the rest of the cadence shifts by the same delta rather than pausing:
             # a paused lead would also stop the callback itself from dispatching.
+            #
+            # Every remaining step moves, not just the ones due before the callback.
+            # Shifting only those reordered the cadence: day 0's text was pushed
+            # past a day 5 text that stayed where it was, and the schedule read
+            # 0, 5, 0, 1, 3, 9, 5, 13. Moving them all by one delta keeps the
+            # spacing, and since each step is already due at or after now, adding
+            # (callback - now) puts every one of them at or after the callback.
             conn.execute(
                 "update outreach_events set scheduled_for=scheduled_for+(%s-now()),updated_at=now() "
-                "where lead_id=%s and status='planned' and scheduled_for<%s",
-                (callback_utc, lead_id, callback_utc),
+                "where lead_id=%s and status='planned'",
+                (callback_utc, lead_id),
             )
             conn.execute(
                 "insert into outreach_events(lead_id,channel,scheduled_for,status) "

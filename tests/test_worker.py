@@ -216,3 +216,41 @@ def test_cadence_completion_does_not_depend_on_the_calendar():
     assert "exists(select 1 from outreach_events oe where oe.lead_id=l.id)" in statement
     assert "and oe.status in ('planned','in_flight','attempted')" in statement
     assert "l.cadence_state='active'" in statement
+
+
+def test_callback_shift_keeps_the_cadence_in_order():
+    """A callback moves every remaining step, not only the early ones.
+
+    Shifting only steps due before the callback pushed them past steps that
+    stayed where they were, so the schedule came out 0, 5, 0, 1, 3, 9, 5, 13.
+    """
+    import inspect
+
+    from rpt_agent.services import lead_status
+
+    source = inspect.getsource(lead_status)
+    start = source.index("update outreach_events set scheduled_for=scheduled_for+")
+    statement = source[start : source.index("(callback_utc", start)]
+
+    assert "status='planned'" in statement
+    # The filter that caused the reordering must not come back.
+    assert "scheduled_for<" not in statement
+
+
+def test_callback_shift_cannot_land_a_step_before_the_callback():
+    """Arithmetic check on the guarantee the shift relies on.
+
+    Each remaining step is due at or after now, so adding (callback - now)
+    leaves every one of them at or after the callback -- which is why the
+    'before the callback' filter is unnecessary as well as harmful.
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime(2026, 9, 9, 18, 4, 42)
+    callback = datetime(2026, 9, 9, 18, 9, 43)
+    delta = callback - now
+    due = [now + timedelta(seconds=s) for s in (0, 79, 80, 81, 199, 379, 439, 679)]
+
+    shifted = [d + delta for d in due]
+    assert all(s >= callback for s in shifted), "a step would reach the patient first"
+    assert shifted == sorted(shifted), "the original order must survive the shift"
