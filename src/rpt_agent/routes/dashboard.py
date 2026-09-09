@@ -1011,10 +1011,15 @@ def move_lead_stage(lead_id: UUID, payload: StageMove, actor: Actor):
                 (lead_id,),
             )
 
+        # to_status is a lead status, not a board stage. Recording payload.stage
+        # put 'cadence', 'closed' and 'attention' into the column -- names that
+        # are not lead statuses at all -- so the history disagreed with the lead
+        # it described. Read back what the move actually set.
+        moved_to = conn.execute("select status from leads where id=%s", (lead_id,)).fetchone()["status"]
         conn.execute(
             "insert into lead_status_history(lead_id,from_status,to_status,source,reason) "
             "values(%s,%s,%s,'dashboard',%s)",
-            (lead_id, lead["status"], payload.stage, f"moved to {payload.stage} from the board"),
+            (lead_id, lead["status"], moved_to, f"moved to {payload.stage} from the board"),
         )
         _audit(
             conn,
