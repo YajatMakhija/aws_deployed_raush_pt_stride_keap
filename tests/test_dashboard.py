@@ -945,3 +945,38 @@ def test_clearing_do_not_contact_does_not_silently_restart_outreach(monkeypatch)
     assert any("status='in_progress'" in sql for sql in connection.statements)
     assert not any("insert into outreach_events" in sql for sql in connection.statements)
     get_settings.cache_clear()
+
+
+def test_activating_a_version_leaves_leads_already_in_outreach_alone(monkeypatch):
+    """A lead mid-cadence finishes the version it started on.
+
+    Activation used to replan every active or paused lead: remaining steps
+    skipped, a fresh schedule built from day 0. A patient on day 13 with one
+    message left would be called again from the beginning, and one click did it
+    to the whole caseload.
+    """
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = ActivateVersionConnection()
+
+    @contextmanager
+    def fake_transaction():
+        yield connection
+
+    monkeypatch.setattr(dashboard_routes, "transaction", fake_transaction)
+    monkeypatch.setattr(dashboard_routes, "materialize_cadence", lambda *a, **k: 1)
+    response = TestClient(app).post(
+        "/api/v1/dashboard/cadence-versions/4/activate",
+        headers={
+            "X-Dashboard-Token": "x" * 32,
+            "X-Dashboard-User-ID": "staff-1",
+            "X-Dashboard-User-Email": "staff@example.test",
+        },
+    )
+    assert response.status_code == 200
+
+    lead_query = next(sql for sql in connection.statements if sql.startswith("select l.id"))
+    # Only leads that have not started outreach are picked up.
+    assert "l.cadence_state='pending'" in lead_query
+    assert "cadence_state in ('active','paused')" not in lead_query
+    get_settings.cache_clear()

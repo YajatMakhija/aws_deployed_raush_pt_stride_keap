@@ -1383,9 +1383,22 @@ def activate_cadence_version(version_id: int, actor: Actor):
                 "and status='active'",
                 (version["practice_id"],),
             )
+            # A lead already in outreach finishes the cadence it started on.
+            #
+            # This used to replan every active or paused lead in the practice:
+            # their remaining steps were skipped and a fresh schedule was built
+            # from day 0. A patient on day 13 with one message left would be
+            # called again from the beginning, and one click did it to the whole
+            # caseload at once.
+            #
+            # Each event already carries its cadence_version_id, so leads in
+            # flight keep running the version stamped on their schedule. The new
+            # version applies to leads created from now on, and to any lead an
+            # operator deliberately restarts from the board -- a restart
+            # materializes against whichever version is active then.
             leads = conn.execute(
                 "select l.id,l.status,l.cadence_state from leads l where l.practice_id=%s "
-                "and l.cadence_state in ('active','paused') and l.status not in "
+                "and l.cadence_state='pending' and l.status not in "
                 "('booked','declined','transferred_human','booking_link_sent','do_not_contact',"
                 "'closed_no_response','invalid_phone') and not exists (select 1 from cadence_versions cv "
                 "where cv.lead_id=l.id and cv.status='active') for update",
