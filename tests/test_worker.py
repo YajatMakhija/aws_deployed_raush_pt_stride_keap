@@ -244,10 +244,10 @@ def test_callback_shift_cannot_land_a_step_before_the_callback():
     leaves every one of them at or after the callback -- which is why the
     'before the callback' filter is unnecessary as well as harmful.
     """
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
-    now = datetime(2026, 9, 9, 18, 4, 42)
-    callback = datetime(2026, 9, 9, 18, 9, 43)
+    now = datetime(2026, 9, 9, 18, 4, 42, tzinfo=UTC)
+    callback = datetime(2026, 9, 9, 18, 9, 43, tzinfo=UTC)
     delta = callback - now
     due = [now + timedelta(seconds=s) for s in (0, 79, 80, 81, 199, 379, 439, 679)]
 
