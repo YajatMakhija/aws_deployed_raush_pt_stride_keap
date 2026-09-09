@@ -870,3 +870,78 @@ def test_delete_lead_refuses_while_a_call_is_in_flight(monkeypatch):
     # Nothing may be removed while a provider result is still coming back.
     assert not any(sql.startswith("delete from") for sql in connection.statements)
     get_settings.cache_clear()
+
+
+class ContactRulesConnection:
+    def __init__(self, status="in_progress"):
+        self.lead = {
+            "id": uuid4(), "practice_id": 1, "status": status, "cadence_state": "active",
+            "call_opt_out": False, "sms_opt_out": False,
+        }
+        self.statements: list[str] = []
+
+    def execute(self, sql, params=None):
+        del params
+        normal = " ".join(sql.split())
+        self.statements.append(normal)
+        if normal.startswith("select id,practice_id,status,cadence_state,call_opt_out"):
+            return Result([dict(self.lead)])
+        if normal.startswith("select status,cadence_state,call_opt_out"):
+            return Result([{
+                "status": self.lead["status"], "cadence_state": self.lead["cadence_state"],
+                "call_opt_out": self.lead["call_opt_out"], "sms_opt_out": self.lead["sms_opt_out"],
+            }])
+        if normal.startswith("update leads set status='do_not_contact'"):
+            self.lead["status"] = "do_not_contact"
+            self.lead["cadence_state"] = "terminated"
+        return Result([])
+
+
+def _set_rules(connection, monkeypatch, body):
+    @contextmanager
+    def fake_transaction():
+        yield connection
+
+    monkeypatch.setattr(dashboard_routes, "transaction", fake_transaction)
+    return TestClient(app).post(
+        f"/api/v1/dashboard/leads/{uuid4()}/contact-rules",
+        json=body,
+        headers={
+            "X-Dashboard-Token": "x" * 32,
+            "X-Dashboard-User-ID": "staff-1",
+            "X-Dashboard-User-Email": "staff@example.test",
+        },
+    )
+
+
+def test_do_not_contact_stops_outreach_as_well_as_blocking_it(monkeypatch):
+    """The switch was display-only, so the dashboard said contact was blocked
+    while the worker carried on calling. It must reach the lead row, and it must
+    also cancel the remaining schedule: planned steps sitting under a
+    do_not_contact status would be the same lie in a different place."""
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = ContactRulesConnection()
+    response = _set_rules(connection, monkeypatch, {"do_not_contact": True})
+
+    assert response.status_code == 200
+    assert response.json()["do_not_contact"] is True
+    assert any("status='do_not_contact'" in sql for sql in connection.statements)
+    assert any("cadence_state='terminated'" in sql for sql in connection.statements)
+    skip = next(sql for sql in connection.statements if sql.startswith("update outreach_events"))
+    assert "status='skipped'" in skip and "status='planned'" in skip
+    assert any("insert into dashboard_audit_log" in sql for sql in connection.statements)
+    get_settings.cache_clear()
+
+
+def test_clearing_do_not_contact_does_not_silently_restart_outreach(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = ContactRulesConnection(status="do_not_contact")
+    response = _set_rules(connection, monkeypatch, {"do_not_contact": False})
+
+    assert response.status_code == 200
+    # The block lifts, but nothing re-plans: restarting a lead is a deliberate act.
+    assert any("status='in_progress'" in sql for sql in connection.statements)
+    assert not any("insert into outreach_events" in sql for sql in connection.statements)
+    get_settings.cache_clear()

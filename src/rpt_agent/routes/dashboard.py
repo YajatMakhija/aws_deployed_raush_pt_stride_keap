@@ -24,6 +24,12 @@ class CadenceAction(BaseModel):
     action: Literal["pause", "resume"]
 
 
+class ContactRules(BaseModel):
+    do_not_contact: bool | None = None
+    call_opt_out: bool | None = None
+    sms_opt_out: bool | None = None
+
+
 class CadenceModeChange(BaseModel):
     mode: Literal["standard"]
 
@@ -689,9 +695,100 @@ def update_lead_cadence(lead_id: UUID, payload: CadenceAction, actor: Actor):
         }:
             raise HTTPException(status_code=409, detail="terminal leads cannot resume cadence")
         new_state = "paused" if payload.action == "pause" else "active"
+        shifted = 0
+        if payload.action == "resume":
+            # Pause has to mean postpone, not suspend. The schedule keeps running
+            # while a lead is paused, so without this every step that fell due
+            # during the pause is overdue the moment it resumes and they all fire
+            # in one tick -- a fortnight of calls and texts inside a minute.
+            #
+            # Shifting the remainder by however long the pause lasted keeps the
+            # spacing the cadence was designed with: day 5 still lands two days
+            # after day 3. The pause start comes from the audit trail, which is
+            # already the record of when it happened.
+            paused_at = conn.execute(
+                "select created_at from dashboard_audit_log where entity_type='lead' "
+                "and entity_id=%s and action='cadence.pause' order by created_at desc limit 1",
+                (str(lead_id),),
+            ).fetchone()
+            if paused_at:
+                shifted = len(
+                    conn.execute(
+                        "update outreach_events set scheduled_for=scheduled_for+(now()-%s),"
+                        "updated_at=now() where lead_id=%s and status='planned' returning id",
+                        (paused_at["created_at"], lead_id),
+                    ).fetchall()
+                )
         conn.execute("update leads set cadence_state=%s where id=%s", (new_state, lead_id))
-        _audit(conn, actor, lead["practice_id"], f"cadence.{payload.action}", "lead", str(lead_id))
-    return {"status": "updated", "cadence_state": new_state}
+        _audit(
+            conn, actor, lead["practice_id"], f"cadence.{payload.action}", "lead", str(lead_id),
+            {"shifted_events": shifted} if shifted else None,
+        )
+    return {"status": "updated", "cadence_state": new_state, "shifted_events": shifted}
+
+
+@router.post("/leads/{lead_id}/contact-rules")
+def set_contact_rules(lead_id: UUID, payload: ContactRules, actor: Actor):
+    """Apply the Do not contact and opt-out switches to the lead itself.
+
+    These were display-only until now: the dashboard flipped a local switch and
+    told the user contact was blocked while the worker carried on calling.
+
+    Do not contact is terminal, so it also stops outreach -- leaving planned
+    steps alive under a do_not_contact status would be the same lie in a
+    different place. Clearing it releases the block but does not restart the
+    cadence; staff restart a lead from the board deliberately.
+    """
+    with transaction() as conn:
+        lead = conn.execute(
+            "select id,practice_id,status,cadence_state,call_opt_out,sms_opt_out "
+            "from leads where id=%s for update",
+            (lead_id,),
+        ).fetchone()
+        if not lead:
+            raise HTTPException(status_code=404, detail="lead not found")
+
+        changes: dict[str, object] = {}
+        for field in ("call_opt_out", "sms_opt_out"):
+            value = getattr(payload, field)
+            if value is not None and value != lead[field]:
+                conn.execute(f"update leads set {field}=%s where id=%s", (value, lead_id))
+                changes[field] = value
+
+        if payload.do_not_contact is not None:
+            currently = lead["status"] == "do_not_contact"
+            if payload.do_not_contact and not currently:
+                conn.execute(
+                    "update leads set status='do_not_contact',cadence_state='terminated',"
+                    "status_changed_at=now() where id=%s",
+                    (lead_id,),
+                )
+                conn.execute(
+                    "update outreach_events set status='skipped',updated_at=now() "
+                    "where lead_id=%s and status='planned'",
+                    (lead_id,),
+                )
+                changes["do_not_contact"] = True
+            elif not payload.do_not_contact and currently:
+                conn.execute(
+                    "update leads set status='in_progress',status_changed_at=now() where id=%s",
+                    (lead_id,),
+                )
+                changes["do_not_contact"] = False
+
+        if changes:
+            _audit(
+                conn, actor, lead["practice_id"], "lead.contact_rules", "lead", str(lead_id), changes
+            )
+        row = conn.execute(
+            "select status,cadence_state,call_opt_out,sms_opt_out from leads where id=%s", (lead_id,)
+        ).fetchone()
+    return {
+        "do_not_contact": row["status"] == "do_not_contact",
+        "call_opt_out": row["call_opt_out"],
+        "sms_opt_out": row["sms_opt_out"],
+        "cadence_state": row["cadence_state"],
+    }
 
 
 @router.post("/leads/{lead_id}/cadence-mode")
