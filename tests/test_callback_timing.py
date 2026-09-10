@@ -132,6 +132,10 @@ def test_callback_moves_an_overdue_remainder_behind_the_callback():
     _schedule_callback(conn, "lead", callback)
 
     shift = next(params for sql, params in conn.params if sql.startswith("update outreach_events"))
+    # Every remaining step moves together. Shifting only a subset is what reordered
+    # a live schedule to 0, 5, 0, 1, 3, 9, 5, 13, so no scheduled_for filter may return.
+    update_sql = next(sql for sql, _ in conn.params if sql.startswith("update outreach_events"))
+    assert "scheduled_for<" not in update_sql and "scheduled_for <" not in update_sql
     assert shift[0].total_seconds() == 301
     insert = next(params for sql, params in conn.params if sql.startswith("insert into outreach_events"))
     assert insert == ("lead", callback)
