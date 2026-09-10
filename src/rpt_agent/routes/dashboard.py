@@ -394,7 +394,7 @@ def dashboard_snapshot(actor: Actor):
             "left join cadence_versions cv on cv.id=mt.cadence_version_id "
             "left join cadence_steps cs on cs.id=mt.cadence_step_id where p.slug='rausch-pt' "
             "and mt.channel='sms' and ((mt.cadence_step_id is null and mt.cadence_version_id is null) "
-            "or (cv.lead_id is null and cv.status='active')) "
+            "or (mt.cadence_step_id is not null and cv.lead_id is null and cv.status='active')) "
             "order by (mt.cadence_step_id is null),cs.day_offset,cs.step_order,mt.id"
         ).fetchall()
         system = conn.execute(
@@ -1480,21 +1480,37 @@ def update_cadence_step(step_id: int, payload: CadenceStepUpdate, actor: Actor):
         raise HTTPException(status_code=422, detail="no cadence fields supplied")
     with transaction() as conn:
         step = conn.execute(
-            "select cs.id,cs.practice_id,cv.status from cadence_steps cs "
+            "select cs.id,cs.practice_id,cs.cadence_version_id,cv.lead_id,cv.status "
+            "from cadence_steps cs "
             "join cadence_versions cv on cv.id=cs.cadence_version_id where cs.id=%s for update",
             (step_id,),
         ).fetchone()
         if not step:
             raise HTTPException(status_code=404, detail="cadence step not found")
-        if step["status"] != "draft":
-            raise HTTPException(status_code=409, detail="only draft cadence versions can be edited")
-        conn.execute(
+        if step["status"] == "deleted" or (
+            step["status"] != "draft" and (payload.description is not None or step["lead_id"] is not None)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="published global versions allow status changes only",
+            )
+        if payload.is_active is False and not conn.execute(
+            "select 1 from cadence_steps where cadence_version_id=%s and id<>%s and is_active limit 1",
+            (step["cadence_version_id"], step_id),
+        ).fetchone():
+            raise HTTPException(status_code=409, detail="at least one cadence step must remain enabled")
+        updated = conn.execute(
             "update cadence_steps set description=coalesce(%s,description),"
-            "is_active=coalesce(%s,is_active) where id=%s",
+            "is_active=coalesce(%s,is_active) where id=%s returning id,description,is_active",
             (payload.description, payload.is_active, step_id),
+        ).fetchone()
+        if payload.is_active:
+            conn.execute("update message_templates set is_active=true where cadence_step_id=%s", (step_id,))
+        _audit(
+            conn, actor, step["practice_id"], "cadence.global_updated", "cadence_step", str(step_id),
+            {"is_active": payload.is_active} if payload.is_active is not None else None,
         )
-        _audit(conn, actor, step["practice_id"], "cadence.global_updated", "cadence_step", str(step_id))
-    return {"status": "updated"}
+    return {"status": "updated", **dict(updated)}
 
 
 @router.post("/message-templates", status_code=201)

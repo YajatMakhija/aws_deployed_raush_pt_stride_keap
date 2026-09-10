@@ -146,19 +146,17 @@ def materialize_cadence(
     app_settings = get_settings()
     accelerated = bool(app_settings.test_mode and lead and lead["is_test"])
     anchor = datetime.now(UTC)
-    # Steps sharing a day were spaced one second apart, so the day-0 SMS went out
-    # in the same worker tick as the day-0 call: a patient who answered and asked
-    # for a callback had already been texted. Spacing later steps by whole minutes
-    # gives the call time to finish and settle first.
-    # step_order runs across the whole cadence, so the gap is counted per day:
-    # the first step of a day is unshifted, the second is STEP_GAP_MINUTES later.
+    # Production keeps the established same-day spacing. A compressed test day is
+    # literal: every step on Day 0 starts at the anchor, Day 1 is one configured
+    # test-day later, and so on. claim_jobs serializes each lead so equal timestamps
+    # cannot make an SMS overtake an unresolved call.
     seen_on_day: dict[int, int] = {}
     base_by_day: dict[int, datetime] = {}
     previous: datetime | None = None
     for step in steps:
         position = seen_on_day.get(step["day_offset"], 0)
         seen_on_day[step["day_offset"]] = position + 1
-        gap = timedelta(minutes=STEP_GAP_MINUTES * position)
+        gap = timedelta(minutes=0 if accelerated else STEP_GAP_MINUTES * position)
         if step["day_offset"] not in base_by_day:
             base_by_day[step["day_offset"]] = (
                 anchor
@@ -167,10 +165,8 @@ def materialize_cadence(
                 else compute_send_time(settings, lead_id, start_on, step["day_offset"])
             )
         scheduled_for = base_by_day[step["day_offset"]] + gap
-        # A three-minute same-day gap is longer than a one-minute compressed
-        # cadence day. Keep synthetic execution ordered even in that case.
-        if accelerated and previous and scheduled_for <= previous:
-            scheduled_for = previous + timedelta(seconds=1)
+        if accelerated and previous and scheduled_for < previous:
+            scheduled_for = previous
         previous = scheduled_for
         conn.execute(
             "insert into outreach_events(lead_id,cadence_step_id,cadence_version_id,channel,"
@@ -193,8 +189,10 @@ def materialize_cadence(
 
 
 CLAIM_SQL = """
-with due as (
- select oe.id from outreach_events oe
+with eligible as (
+ select oe.id,oe.lead_id,oe.scheduled_for,
+ row_number() over(partition by oe.lead_id order by oe.scheduled_for,oe.id) as lead_order
+ from outreach_events oe
  join leads l on l.id=oe.lead_id
  join practices p on p.id=l.practice_id
  join practice_settings ps on ps.practice_id=l.practice_id
@@ -232,8 +230,15 @@ with due as (
        at time zone coalesce(l.timezone,p.timezone)
      )
    ) < ps.max_sms_per_lead_per_day
- ))
- order by oe.scheduled_for limit %(limit)s for update of oe skip locked
+  ))
+ and not exists(
+   select 1 from outreach_events active_event
+   where active_event.lead_id=oe.lead_id and active_event.status in ('in_flight','attempted')
+ )
+), due as (
+ select oe.id from outreach_events oe
+ join eligible e on e.id=oe.id and e.lead_order=1
+ order by oe.scheduled_for,oe.id limit %(limit)s for update of oe skip locked
 )
 update outreach_events oe set status='in_flight',updated_at=now()
 from due where oe.id=due.id

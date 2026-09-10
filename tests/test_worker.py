@@ -6,6 +6,7 @@ from rpt_agent.config import Settings, get_settings
 from rpt_agent.observability import WorkflowTrace
 from rpt_agent.providers import ProviderError
 from rpt_agent.worker import (
+    CLAIM_SQL,
     Job,
     compute_send_time,
     dispatch_job,
@@ -103,7 +104,7 @@ def test_test_mode_compresses_only_synthetic_leads(monkeypatch):
     assert (production.inserted[1] - production.inserted[0]).total_seconds() > 5 * 60
 
 
-def test_compressed_same_day_gap_never_overtakes_later_day(monkeypatch):
+def test_compressed_cadence_uses_exact_day_offsets(monkeypatch):
     monkeypatch.setattr(
         "rpt_agent.worker.get_settings",
         lambda: Settings(test_mode=True, test_cadence_day_minutes=1),
@@ -115,8 +116,14 @@ def test_compressed_same_day_gap_never_overtakes_later_day(monkeypatch):
     ])
     materialize_cadence(connection, "test-lead", 1, date(2026, 8, 24))
     assert connection.inserted == sorted(connection.inserted)
-    assert (connection.inserted[1] - connection.inserted[0]).total_seconds() == 180
-    assert (connection.inserted[2] - connection.inserted[1]).total_seconds() == 1
+    assert connection.inserted[1] == connection.inserted[0]
+    assert (connection.inserted[2] - connection.inserted[0]).total_seconds() == 60
+
+
+def test_worker_claims_only_one_due_event_per_lead():
+    assert "row_number() over(partition by oe.lead_id" in CLAIM_SQL
+    assert "e.lead_order=1" in CLAIM_SQL
+    assert "active_event.status in ('in_flight','attempted')" in CLAIM_SQL
 
 
 def test_dispatch_classifies_safe_retry_and_ambiguous_exception():
@@ -216,41 +223,3 @@ def test_cadence_completion_does_not_depend_on_the_calendar():
     assert "exists(select 1 from outreach_events oe where oe.lead_id=l.id)" in statement
     assert "and oe.status in ('planned','in_flight','attempted')" in statement
     assert "l.cadence_state='active'" in statement
-
-
-def test_callback_shift_keeps_the_cadence_in_order():
-    """A callback moves every remaining step, not only the early ones.
-
-    Shifting only steps due before the callback pushed them past steps that
-    stayed where they were, so the schedule came out 0, 5, 0, 1, 3, 9, 5, 13.
-    """
-    import inspect
-
-    from rpt_agent.services import lead_status
-
-    source = inspect.getsource(lead_status)
-    start = source.index("update outreach_events set scheduled_for=scheduled_for+")
-    statement = source[start : source.index("(callback_utc", start)]
-
-    assert "status='planned'" in statement
-    # The filter that caused the reordering must not come back.
-    assert "scheduled_for<" not in statement
-
-
-def test_callback_shift_cannot_land_a_step_before_the_callback():
-    """Arithmetic check on the guarantee the shift relies on.
-
-    Each remaining step is due at or after now, so adding (callback - now)
-    leaves every one of them at or after the callback -- which is why the
-    'before the callback' filter is unnecessary as well as harmful.
-    """
-    from datetime import UTC, datetime, timedelta
-
-    now = datetime(2026, 9, 9, 18, 4, 42, tzinfo=UTC)
-    callback = datetime(2026, 9, 9, 18, 9, 43, tzinfo=UTC)
-    delta = callback - now
-    due = [now + timedelta(seconds=s) for s in (0, 79, 80, 81, 199, 379, 439, 679)]
-
-    shifted = [d + delta for d in due]
-    assert all(s >= callback for s in shifted), "a step would reach the patient first"
-    assert shifted == sorted(shifted), "the original order must survive the shift"

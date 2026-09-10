@@ -135,6 +135,27 @@ def mark_booked(conn, lead_id: str, source: str) -> None:
         record_status(conn, lead_id, lead["status"], "booked", source, "appointment confirmed")
 
 
+def _schedule_callback(conn, lead_id: str, callback_utc: datetime) -> None:
+    """Put the callback first and preserve the remaining cadence's spacing."""
+    row = conn.execute(
+        "select min(scheduled_for) as earliest from outreach_events "
+        "where lead_id=%s and status='planned'",
+        (lead_id,),
+    ).fetchone()
+    earliest = row["earliest"] if row else None
+    if earliest is not None and earliest <= callback_utc:
+        conn.execute(
+            "update outreach_events set scheduled_for=scheduled_for+%s,updated_at=now() "
+            "where lead_id=%s and status='planned'",
+            (callback_utc + timedelta(seconds=1) - earliest, lead_id),
+        )
+    conn.execute(
+        "insert into outreach_events(lead_id,channel,scheduled_for,status) "
+        "values(%s,'call',%s,'planned')",
+        (lead_id, callback_utc),
+    )
+
+
 def report_lead_status(
     trace: WorkflowTrace,
     *,
@@ -264,26 +285,7 @@ def report_lead_status(
                 "status_changed_at=now() where id=%s",
                 (callback_utc, note or None, lead_id),
             )
-            # Nothing should reach the patient before the callback they were promised,
-            # so the rest of the cadence shifts by the same delta rather than pausing:
-            # a paused lead would also stop the callback itself from dispatching.
-            #
-            # Every remaining step moves, not just the ones due before the callback.
-            # Shifting only those reordered the cadence: day 0's text was pushed
-            # past a day 5 text that stayed where it was, and the schedule read
-            # 0, 5, 0, 1, 3, 9, 5, 13. Moving them all by one delta keeps the
-            # spacing, and since each step is already due at or after now, adding
-            # (callback - now) puts every one of them at or after the callback.
-            conn.execute(
-                "update outreach_events set scheduled_for=scheduled_for+(%s-now()),updated_at=now() "
-                "where lead_id=%s and status='planned'",
-                (callback_utc, lead_id),
-            )
-            conn.execute(
-                "insert into outreach_events(lead_id,channel,scheduled_for,status) "
-                "values(%s,'call',%s,'planned')",
-                (lead_id, callback_utc),
-            )
+            _schedule_callback(conn, lead_id, callback_utc)
             record_status(
                 conn, lead_id, lead["status"], "callback_scheduled", "tool", note or "callback requested"
             )
@@ -472,11 +474,7 @@ def apply_call_outcome(
                 "callback_requested_at=%s,callback_notes=%s,status_changed_at=now() where id=%s",
                 (outcome, callback_utc, (callback_notes or "")[:500] or None, lead_id),
             )
-            conn.execute(
-                "insert into outreach_events(lead_id,channel,scheduled_for,status) "
-                "values(%s,'call',%s,'planned')",
-                (lead_id, callback_utc),
-            )
+            _schedule_callback(conn, lead_id, callback_utc)
             record_status(
                 conn, lead_id, lead["status"], "callback_scheduled", source, "callback requested"
             )

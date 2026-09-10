@@ -3,7 +3,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from rpt_agent.services.lead_status import clamp_to_business_hours, resolve_callback_time
+from rpt_agent.services.lead_status import (
+    _schedule_callback,
+    clamp_to_business_hours,
+    resolve_callback_time,
+)
 
 PT = ZoneInfo("America/Los_Angeles")
 HOURS = {
@@ -103,6 +107,34 @@ def test_holiday_is_skipped():
 def test_no_configured_hours_leaves_the_time_untouched():
     when = _local(2026, 8, 30, 3)
     assert clamp_to_business_hours(when, PT, {}, []) == when
+
+
+def test_callback_moves_an_overdue_remainder_behind_the_callback():
+    class Result:
+        def __init__(self, row=None):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Connection:
+        def __init__(self):
+            self.params = []
+
+        def execute(self, sql, params):
+            self.params.append((" ".join(sql.split()), params))
+            if sql.startswith("select min"):
+                return Result({"earliest": datetime(2026, 9, 10, 17, 20, tzinfo=UTC)})
+            return Result()
+
+    conn = Connection()
+    callback = datetime(2026, 9, 10, 17, 25, tzinfo=UTC)
+    _schedule_callback(conn, "lead", callback)
+
+    shift = next(params for sql, params in conn.params if sql.startswith("update outreach_events"))
+    assert shift[0].total_seconds() == 301
+    insert = next(params for sql, params in conn.params if sql.startswith("insert into outreach_events"))
+    assert insert == ("lead", callback)
 
 
 if __name__ == "__main__":

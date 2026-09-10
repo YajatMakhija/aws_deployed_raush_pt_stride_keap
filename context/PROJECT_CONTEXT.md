@@ -1,6 +1,6 @@
 # RPT Agent — Complete Project Context and Handoff
 
-Last updated: 2026-09-03 (Asia/Calcutta)
+Last updated: 2026-09-10 (Asia/Calcutta)
 
 This is the durable context file for future Codex, Claude, and human development sessions. Read this file
 before changing the project. Update it whenever a material decision, schema migration, integration contract,
@@ -84,7 +84,7 @@ Current scope:
 Explicitly out of scope:
 
 - Any redesign of stable scheduling or cadence time spreading.
-- EC2 provisioning, Terraform, load balancers, or AWS runtime work in this milestone.
+- Additional EC2 provisioning, Terraform, or load-balancer work without a demonstrated deployment need.
 - Direct Keap contacts/tags/email/OAuth or CRM internals; the supplied signed team-owned webhook is the
   implemented real boundary.
 - Speculative Stride patient matching.
@@ -140,6 +140,13 @@ Local services:
 - Mock provider: `http://localhost:9000` only when Compose profile `mock` is explicitly selected.
 - Public API: the HTTPS value configured in `PUBLIC_BASE_URL`.
 
+Deployment artifacts now include `docker-compose.prod.yml` and `Caddyfile`. The production Compose design is
+API + exactly one worker + Caddy TLS termination; the single-worker constraint matters because dispatch rate
+governors are process-local. The configured public hostname is `stride.aibolt.ai`. This audit did not have
+access to the remote AWS host, so it does not assert which commit is currently deployed there. The local
+Docker Desktop daemon was stopped during the 2026-09-10 verification, so local container health was not
+checked.
+
 Do not expose mock-provider port 9000 through ngrok. Only API port 8000 is public.
 
 ## Source structure
@@ -184,6 +191,11 @@ docs/LOCAL_VAPI_NGROK.md
 docs/FUTURE_DEPLOYMENT.md
 tests/
 ```
+
+The companion frontend is a separate repository at `F:\rpt\rpt_frontend`. It is a compact React 19 / Next
+16 application built through Vinext/Vite. Most dashboard behavior lives in `app/dashboard-shell.tsx`; server
+session/auth helpers and the authenticated catch-all dashboard proxy keep the browser away from the backend
+dashboard token. It has no client state-management or component-library dependency.
 
 The old flat `services.py` was removed and split into the `services/` package. HTTP routes and provider
 contracts are now named by responsibility so the pre-production path is navigable without adding a framework
@@ -231,6 +243,35 @@ Migrations through 022 are applied to the currently configured hosted Supabase p
 end-to-end defect where a null `stride_location_timezone` caused `ZoneInfo(None)` during confirmation SMS
 delivery. Runtime delivery also falls back to the lead timezone and then `America/Los_Angeles`.
 
+### Verified hosted Supabase snapshot (read-only, 2026-09-10)
+
+The Supabase MCP server was not exposed in the current tool session. The same hosted database was therefore
+inspected through the application's configured pooled Postgres connection inside read-only transactions. No
+patient-level values, message bodies, transcripts, credentials, or external writes were read or emitted.
+
+- The migration registry contains all 23 files through `022_deleted_cadence_versions.sql` (there are two
+  intentionally distinct `016_*` migrations).
+- There are 23 public tables and all have RLS enabled. No `pg_policies` rows exist; the application connects as
+  the non-superuser `postgres` role with `BYPASSRLS`. Treat the database as server-only unless explicit
+  authenticated/anonymous policies are deliberately added and tested.
+- Safe aggregate counts: 9 leads, 286 outreach events, 74 call logs, 72 SMS rows, 645 provider receipts,
+  283 PHI-free integration audit rows, 126 dashboard audit rows, 52 message templates, and 0 appointments.
+  All 9 current leads are terminal; there are no active/pending leads and no planned/in-flight/unknown outreach.
+- Cadence state: 8 global versions and 1 lead-scoped draft. `Standard v10` is the sole active global version
+  with 8 enabled steps; v3/v8/v9 are archived and v4-v7 are soft-deleted.
+- Operational queues are empty for retryable provider receipts, outbox delivery, notifications, review-needed
+  appointments, and unknown/in-flight outreach. Fourteen exhausted historical webhook receipts remain
+  dead-lettered (4 Twilio message-status and 10 Vapi end-of-call reports, all at 5 attempts); they are retained
+  history, not retryable queue work, but their causes still need an operational classification.
+- Integrity checks found no outreach step missing a version, no version/step mismatch, no planned work on a
+  terminal lead, no cadence SMS step without a linked template, and exactly one active global version.
+- One concrete schema/data defect remains: six active-v10 `message_templates` rows have a version ID but no
+  cadence-step ID. The live legacy foreign key is `ON DELETE SET NULL`, while draft saves delete/recreate steps;
+  this detaches old templates instead of deleting them. Current dashboard queries exclude those rows and the
+  frontend requires both cadence links to be null before calling a template reusable, so they no longer appear
+  in Template Studio. Resolve the underlying rows/FK with a migration plus scoped cleanup, not an ad-hoc
+  production delete.
+
 Important database guarantees and semantics:
 
 - Every submitted outreach event is validated to belong to the submitted lead.
@@ -258,9 +299,32 @@ Important database guarantees and semantics:
 
 ## Cadence and synthetic test mode
 
-Production business-hour spreading remains unchanged. Cadence definitions are now immutable versions:
-an active lead-specific version takes precedence over the active global version, and activation replaces only
-future `planned` events while preserving in-flight and completed outreach.
+Production business-hour spreading remains unchanged. Published cadence definitions are immutable versions;
+only a draft can change timing, order, channel, copy, or the per-step Enabled switch. Creating an editable
+draft clones the selected version, and activating it archives the previous global version. Renaming is metadata
+only and is allowed separately.
+
+Global activation applies the new version only to leads whose cadence is still `pending` (unstarted). Leads
+already `active` or `paused` keep the `cadence_version_id` on their existing outreach and finish the version
+they started. A staff restart that moves a lead back to New clears the old run and starts on whichever global
+version is active at that time. A lead-specific draft still takes precedence when explicitly activated for that
+lead and replaces only that lead's future `planned` events.
+
+When a future callback is accepted, the service adds one standalone callback call and shifts every remaining
+planned cadence event by one common delta so the earliest remainder is one second after the callback. This
+also handles an overdue same-time Day 0 event after a long call while preserving all original spacing. The
+worker claims at most one event per lead and waits while a call is unresolved, so another message cannot
+overtake the callback decision. The dashboard labels the standalone event as `Callback` rather than `Day —`.
+
+Template Studio and Cadence Studio have separate responsibilities. Reusable templates have both cadence links
+null and remain freely editable/importable. Published cadence message wording stays locked in Template Studio
+and must be changed through a draft; the backend enforces that boundary with HTTP 409. Global published
+versions now allow their per-step Enabled status to be changed directly in the Status column. This changes
+future starts/restarts on that version; already-materialized lead schedules remain pinned and unchanged.
+
+Compressed synthetic scheduling uses the exact test-day offset: all Day 0 events share the creation anchor,
+Day 1 is one configured test-day later, and so on. Production retains the established three-minute gap between
+steps sharing one cadence day.
 
 When both conditions are true:
 
@@ -492,7 +556,7 @@ Rules:
 - Booked requires a confirmed appointment and completes/skips the remaining cadence.
 - Declined terminates outreach without adding a channel opt-out.
 - Booking-link status queues the existing durable SMS path only when consent/suppression checks allow it.
-- Human transfer pauses cadence; wrong-person/unknown states flag staff attention.
+- Human transfer completes the cadence; wrong-person/unknown states flag staff attention.
 - Day 9 inbound SMS `CALL` records a callback request.
 
 ## Observability and debugging
@@ -555,13 +619,14 @@ applied, and both idempotent mock deliveries completed.
 
 ## Test and quality status
 
-Latest verified local result on 2026-08-26 after the pre-production booking API work:
+Latest verified local result on 2026-09-10 at backend `3fa829d` and frontend `e77827d`:
 
 ```text
-51 passed, 3 skipped
-ruff: all checks passed
-docker compose config: valid
-configured Supabase migration registry: 001-015 present
+backend: 98 passed, 3 skipped; Ruff all checks passed
+frontend: TypeScript check passed; Vinext production build passed
+frontend lint: passed
+development and production Compose configuration: valid
+configured Supabase migration registry: all 23 entries through 022 present
 ```
 
 The three skipped tests are optional integration/real-provider tests requiring explicit environment values,
@@ -638,6 +703,15 @@ python -m ruff check .
 git diff --check
 ```
 
+Frontend checks on Windows PowerShell (use `npm.cmd` because local script execution policy blocks `npm.ps1`):
+
+```powershell
+cd F:\rpt\rpt_frontend
+npm.cmd run lint
+npm.cmd run typecheck
+npm.cmd run build
+```
+
 ## Docker and local-development fixes
 
 - Docker uses `PYTHONPATH=/app/src`. This fixed a serious reload problem where bind-mounted source changed
@@ -650,21 +724,19 @@ git diff --check
 
 ## Current Git state at this handoff
 
-The last pushed commit is `09773f5 feat: track test usage and delivery status`. The retry/reconciliation and
-pre-production booking API changes described in the 2026-08-26 changelog entries remain working-tree changes
-until explicitly committed. Earlier commits include:
-
-- `09773f5 feat: track test usage and delivery status`
-- `636f3a5 vapi intigration`
-- `32fc84b first commit having all the relevent practices implimented from the aws_deployed_project`
-
-Creating/updating this context file makes it a new worktree change until committed. Never discard unrelated
-user work when continuing development.
+- Backend `F:\rpt\aws_deployed_raush_pt_stride_keap`: branch `main`, HEAD `3fa829d`, aligned with
+  `origin/main` before this context-only edit.
+- Frontend `F:\rpt\rpt_frontend`: branch `new-changes`, HEAD `e77827d`. That commit also matches
+  `origin/main`, while the local branch reports 13 commits ahead of its configured `origin/new-changes`
+  upstream. Do not rewrite or retarget the branch without the user's direction.
+- The 2026-09-10 pull left both repositories clean. This context refresh is the only intentional post-pull
+  source-tree change.
 
 ## Known limitations and next work
 
-- Real Stride appointment creation is implemented but intentionally gated off until the numeric Initial
-  Evaluation appointment-type ID is confirmed and `stride_booking_enabled=true` is set for the practice.
+- Real Stride appointment creation is implemented but remains gated off: live
+  `stride_booking_enabled=false`. The live appointment-type ID is `8`, while the sandbox migration/README
+  describes `1452`; reverify the correct environment-specific Initial Evaluation ID before enabling writes.
 - The real Keap boundary is the team-owned signed handoff. Direct OAuth/CRM mutation remains out of scope.
 - Real Twilio outbound messaging is supported; inbound SMS still terminates at Vapi until the webhook
   ownership decision described above is made.
@@ -674,9 +746,16 @@ user work when continuing development.
 - Real-provider contract tests remain disabled unless explicit sandbox variables are present.
 - Vapi/Twilio/Stride create operations with an ambiguous result still require provider reconciliation because
   the supplied contracts do not expose a safe client idempotency key or lookup for an ID-less timeout.
-- The Vapi sync script has not been run against the live assistant for this change. Run it only after the
-  pre-production public URL/auth configuration and Stride booking settings have been confirmed.
-- AWS deployment remains deferred. `docs/FUTURE_DEPLOYMENT.md` is preparation only.
+- Fix the live `message_templates.cadence_step_id` delete behavior and clean up the six detached active-v10
+  rows with an audited migration before relying on Template Studio's reusable/cadence grouping.
+- Classify the 14 retained exhausted provider webhook receipts and add an operational dead-letter review path
+  only if staff need one; there is no currently retryable receipt backlog.
+- The live test assistant was synchronized on 2026-09-10: its repository prompt, strict availability,
+  appointment, and lead-status function tools, end-report webhook, and callback structured-output fallback
+  were verified. Future prompt/tool changes still require rerunning the idempotent sync script.
+- Production Compose/Caddy deployment artifacts exist, but the remote AWS host/release was not inspected in
+  this audit. Verify its running commit, health, worker cardinality, backups, and alerting before calling the
+  deployment production-ready.
 - Before production PHI, complete vendor agreements, production security review, secret management, database
   backup/restore validation, alerting, and log-shipping review.
 
@@ -698,6 +777,45 @@ user work when continuing development.
 
 Append entries newest first. Include date, decision/change, migrations, configuration impact, validation, and
 known follow-up. Do not include secrets or patient/tester identifiers.
+
+### 2026-09-10 — Inline statuses, exact test timing, and reliable callbacks
+
+- Removed generated cadence-key suffixes such as the random hexadecimal portion of `step_2_*` from frontend
+  template names. The stored stable key remains unchanged. Active-version template queries also exclude the
+  six known detached legacy rows instead of presenting them as reusable templates.
+- Added an audited inline Enabled control to the Status column of active and previous global versions. It
+  changes future starts/restarts without rewriting already-materialized lead schedules; timing, channel, and
+  wording edits still require a draft, and the final enabled step cannot be disabled.
+- Removed the hard-coded three-minute same-day delay from compressed synthetic runs. Same-day test steps now
+  share an exact timestamp, while successive cadence days use their exact configured minute offsets.
+- Serialized worker claims per lead and made callback insertion shift an overdue remainder behind the promised
+  callback while preserving cadence spacing. Both the direct status tool and legacy outcome path use the same
+  callback scheduler.
+- Synchronized the live Vapi test assistant after confirming it had a stale prompt and only one legacy status
+  request tool. The repository prompt now matches live, all three strict function tools are attached, the
+  structured callback fallback remains attached, and only end-of-call reports are sent to the backend.
+- Validation: `98 passed, 3 skipped`; Ruff, frontend ESLint, TypeScript, Vinext production build, both diff
+  checks, and a read-only PostgreSQL `EXPLAIN` of the new claim query passed. Local browser visual QA was not
+  available because no browser connection was exposed.
+
+### 2026-09-10 — Version pinning, callback order, template boundaries, and context audit
+
+- Global cadence activation now materializes the new version only for pending/unstarted leads. Active and
+  paused leads remain pinned to their existing version; staff restart from New selects the then-active global
+  version. Lead detail reports the version the lead is actually running separately from the global default.
+- A scheduled callback now shifts every remaining planned cadence event by the same delta before adding the
+  standalone callback call. This preserves cadence order and spacing, and the dashboard displays the event as
+  `Callback` instead of `Day —`.
+- Published cadence messages are immutable in both API and UI. Template Studio separates reusable copy from
+  locked cadence messages; edits to timing, channel, copy, and Enabled state happen in an editable cadence
+  draft.
+- Refreshed the full repository and hosted-data context after pulling backend `3fa829d` and frontend `e77827d`.
+  The database pass was aggregate/schema-only and read-only. It verified all 23 migration records, empty live
+  work queues, version state, RLS posture, 14 historical dead letters, and the six detached active-v10 template
+  rows caused by the live legacy foreign-key behavior.
+- Validation: backend `96 passed, 3 skipped`, Ruff, and both Compose configurations passed; frontend TypeScript
+  and production build passed. Frontend lint currently has 3 errors and 1 warning, documented under known work.
+  Docker Desktop was not running, so container health and the remote AWS release were not claimed as verified.
 
 ### 2026-09-04 — Cadence reactivation and SMS preview fidelity
 

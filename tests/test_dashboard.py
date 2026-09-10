@@ -473,9 +473,6 @@ def test_archived_global_version_can_be_reactivated(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "active"
     get_settings.cache_clear()
-
-
-
 def test_cadence_version_rejects_empty_sms_copy(monkeypatch):
     monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
     get_settings.cache_clear()
@@ -496,6 +493,50 @@ def test_cadence_version_rejects_empty_sms_copy(monkeypatch):
     )
     assert response.status_code == 422
     assert "message copy" in response.json()["detail"]
+    get_settings.cache_clear()
+
+
+class PublishedStepConnection:
+    def __init__(self):
+        self.statements: list[str] = []
+
+    def execute(self, sql, params=None):
+        normal = " ".join(sql.split())
+        self.statements.append(normal)
+        if normal.startswith("select cs.id,cs.practice_id,cs.cadence_version_id"):
+            return Result([{
+                "id": 12, "practice_id": 1, "cadence_version_id": 9,
+                "lead_id": None, "status": "archived",
+            }])
+        if normal.startswith("select 1 from cadence_steps"):
+            return Result([{"exists": 1}])
+        if normal.startswith("update cadence_steps"):
+            return Result([{"id": 12, "description": "Day 1 reminder", "is_active": params[1]}])
+        return Result([])
+
+
+def test_published_global_step_status_can_be_changed_inline(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = PublishedStepConnection()
+
+    @contextmanager
+    def fake_transaction():
+        yield connection
+
+    monkeypatch.setattr(dashboard_routes, "transaction", fake_transaction)
+    response = TestClient(app).patch(
+        "/api/v1/dashboard/cadence-steps/12",
+        json={"is_active": False},
+        headers={
+            "X-Dashboard-Token": "x" * 32,
+            "X-Dashboard-User-ID": "staff-1",
+            "X-Dashboard-User-Email": "staff@example.test",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["is_active"] is False
+    assert any(sql.startswith("update cadence_steps") for sql in connection.statements)
     get_settings.cache_clear()
 
 

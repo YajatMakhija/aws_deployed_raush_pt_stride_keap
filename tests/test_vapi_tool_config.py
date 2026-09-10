@@ -25,3 +25,9 @@ def test_vapi_tools_are_sync_strict_and_have_concise_start_messages():
     assert "outreach_event_id" in {item["key"] for item in tools[2]["parameters"]}
     slow_tools = tools[:2]
     assert all(tool["messages"][0]["type"] == "request-start" for tool in slow_tools)
+
+
+def test_callback_is_recorded_immediately_after_confirmation():
+    prompt = Path("config/vapi_assistant_prompt.md").read_text(encoding="utf-8")
+    assert "call `update_lead_status` immediately" in prompt
+    assert "Do not speak again or end the call until the tool" in prompt

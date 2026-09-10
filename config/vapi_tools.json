@@ -73,7 +73,7 @@
     "type": "function",
     "function": {
       "name": "update_lead_status",
-      "description": "Record the call outcome while the call is active. Call once before ending every answered call.",
+      "description": "Record the call outcome while the call is active. For a confirmed callback, call immediately before speaking again. Otherwise call once before ending every answered call.",
       "strict": true,
       "parameters": {
         "type": "object",
