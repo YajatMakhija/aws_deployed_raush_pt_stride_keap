@@ -989,3 +989,90 @@ def test_activating_a_version_leaves_leads_already_in_outreach_alone(monkeypatch
     assert "l.cadence_state='pending'" in lead_query
     assert "cadence_state in ('active','paused')" not in lead_query
     get_settings.cache_clear()
+
+
+class TemplateConnection:
+    def __init__(self, cadence_step_id=None):
+        self.template = {"id": 7, "practice_id": 1, "cadence_step_id": cadence_step_id,
+                         "cadence_version_id": 10 if cadence_step_id else None}
+        self.statements: list[str] = []
+
+    def execute(self, sql, params=None):
+        del params
+        normal = " ".join(sql.split())
+        self.statements.append(normal)
+        if normal.startswith("select mt.id,mt.practice_id,mt.cadence_step_id,mt.cadence_version_id from"):
+            return Result([dict(self.template)])
+        if normal.startswith("select mt.id,mt.practice_id,mt.cadence_step_id,mt.cadence_version_id,mt.key"):
+            return Result([{**self.template, "key": "Welcome", "name": "Welcome", "body": "Hi",
+                            "is_active": True, "day_offset": None, "description": None}])
+        if normal.startswith("select id from practices"):
+            return Result([{"id": 1}])
+        if normal.startswith("insert into message_templates"):
+            return Result([{"id": 8, "practice_id": 1, "cadence_step_id": None,
+                            "cadence_version_id": None, "key": "Welcome", "name": "Welcome",
+                            "body": "Hi", "is_active": True}])
+        return Result([])
+
+
+def _template_request(connection, monkeypatch, method, path, body):
+    @contextmanager
+    def fake_transaction():
+        yield connection
+
+    monkeypatch.setattr(dashboard_routes, "transaction", fake_transaction)
+    return TestClient(app).request(
+        method, f"/api/v1/dashboard/{path}", json=body,
+        headers={"X-Dashboard-Token": "x" * 32, "X-Dashboard-User-ID": "staff-1",
+                 "X-Dashboard-User-Email": "staff@example.test"},
+    )
+
+
+def test_template_studio_cannot_edit_a_published_cadence_message(monkeypatch):
+    """A cadence message belongs to a published, immutable version. Editing it
+    from Template Studio changed what live leads receive with no new version.
+    Delete already refused this; update did not."""
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = TemplateConnection(cadence_step_id=58)
+    response = _template_request(connection, monkeypatch, "PATCH", "message-templates/7", {"body": "changed"})
+    assert response.status_code == 409
+    assert not any(sql.startswith("update message_templates") for sql in connection.statements)
+    get_settings.cache_clear()
+
+
+def test_reusable_template_stays_editable(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = TemplateConnection(cadence_step_id=None)
+    response = _template_request(connection, monkeypatch, "PATCH", "message-templates/7", {"body": "changed"})
+    assert response.status_code == 200
+    assert any(sql.startswith("update message_templates") for sql in connection.statements)
+    get_settings.cache_clear()
+
+
+def test_new_template_is_not_linked_to_any_cadence(monkeypatch):
+    """A new template is reusable copy until someone imports it into a draft."""
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = TemplateConnection()
+    response = _template_request(connection, monkeypatch, "POST", "message-templates",
+                                 {"name": "Welcome", "body": "Hi"})
+    assert response.status_code == 201
+    insert = next(sql for sql in connection.statements if sql.startswith("insert into message_templates"))
+    assert "values(%s,null,null," in insert
+    assert response.json()["cadence_step_id"] is None
+    get_settings.cache_clear()
+
+
+def test_restart_from_new_starts_on_the_active_version():
+    """Your rule for version changes: leads already running finish their old
+    version; a lead moved back to New starts on whichever version is active.
+    The restart passes no version id, so materialize_cadence selects the active
+    one -- this pins that down."""
+    import inspect
+
+    source = inspect.getsource(dashboard_routes.move_lead_stage)
+    restart = source[source.index("restarted = materialize_cadence("):]
+    restart = restart[: restart.index(")") + 1]
+    assert "cadence_version_id" not in restart

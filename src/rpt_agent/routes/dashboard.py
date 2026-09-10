@@ -389,7 +389,7 @@ def dashboard_snapshot(actor: Actor):
         templates = conn.execute(
             "select mt.id,mt.key,mt.key as name,mt.body,mt.is_active,mt.cadence_step_id,"
             "mt.cadence_version_id,(mt.cadence_step_id is null) as deletable,"
-            "cs.day_offset,cs.description "
+            "cs.day_offset,cs.description,cv.name as version_name "
             "from message_templates mt join practices p on p.id=mt.practice_id "
             "left join cadence_versions cv on cv.id=mt.cadence_version_id "
             "left join cadence_steps cs on cs.id=mt.cadence_step_id where p.slug='rausch-pt' "
@@ -1544,6 +1544,15 @@ def update_message_template(template_id: int, payload: TemplateUpdate, actor: Ac
         ).fetchone()
         if not template:
             raise HTTPException(status_code=404, detail="SMS template not found")
+        # A message tied to a cadence step is part of a published version, and
+        # published versions are immutable. Editing it here changed what live
+        # leads receive without creating a new version or leaving any trace in
+        # Cadence Studio. Delete already refused this; update did not.
+        if template["cadence_step_id"] is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="cadence messages are edited in a cadence draft, not in Template Studio",
+            )
         name = payload.name.strip() if payload.name is not None else None
         if name:
             duplicate = conn.execute(
