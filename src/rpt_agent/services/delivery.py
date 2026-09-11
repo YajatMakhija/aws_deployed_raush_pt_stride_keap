@@ -11,6 +11,16 @@ from ..usage_report import record_test_usage
 from ..vapi_contract import extract_vapi_context, outcome_from_ended_reason
 from .lead_status import apply_call_outcome
 
+# The patient's last word on the call wins. A booking link waits two minutes
+# after it is requested; if by then the lead is no longer booking_link_sent
+# (they declined, asked for a callback, were transferred, or staff changed the
+# lead) the text is never sent.
+CANCEL_CHANGED_BOOKING_LINK_SQL = (
+    "update notification_log n set status='skipped',error=%s,updated_at=now() "
+    "from leads l where n.lead_id=l.id and n.status='queued' "
+    "and n.notification_type='sms_booking_link' and l.status<>'booking_link_sent'"
+)
+
 
 def process_pending_integrations(
     trace: WorkflowTrace, providers: ProviderClients | None = None
@@ -24,6 +34,10 @@ def process_pending_integrations(
             "from leads l where n.lead_id=l.id and n.status='queued' and (l.sms_opt_out or exists("
             "select 1 from suppressed_numbers s where s.phone_e164=l.phone_e164))",
             ("notification canceled because the recipient is opted out or suppressed",),
+        )
+        conn.execute(
+            CANCEL_CHANGED_BOOKING_LINK_SQL,
+            ("booking link canceled because the patient changed their decision",),
         )
         notifications = conn.execute(
             "select n.id,n.lead_id,n.appointment_id,n.notification_type,n.payload,n.attempts,"

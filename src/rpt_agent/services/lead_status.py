@@ -137,6 +137,15 @@ def mark_booked(conn, lead_id: str, source: str) -> None:
 
 def _schedule_callback(conn, lead_id: str, callback_utc: datetime) -> None:
     """Put the callback first and preserve the remaining cadence's spacing."""
+    # A lead has at most one pending callback. A second one is the patient
+    # correcting the time (ten, then "no, nine"), so it replaces the first rather
+    # than booking a call at both times. Only never-dispatched standalone
+    # callbacks go; cadence steps and anything already sent are untouched.
+    conn.execute(
+        "delete from outreach_events where lead_id=%s and status='planned' "
+        "and cadence_step_id is null and day_offset is null",
+        (lead_id,),
+    )
     row = conn.execute(
         "select min(scheduled_for) as earliest from outreach_events "
         "where lead_id=%s and status='planned'",
@@ -162,6 +171,7 @@ def report_lead_status(
     lead_id: str,
     status: str,
     call_id: str | None,
+    tool_call_id: str | None = None,
     event_id: int | None = None,
     notes: str | None = None,
     callback_requested_at: datetime | None = None,
@@ -210,7 +220,17 @@ def report_lead_status(
         stable_call_id = call_id or (str(event["vapi_call_id"]) if event and event["vapi_call_id"] else None)
         if not stable_call_id:
             raise ValueError("call_id or outreach_event_id is required")
-        receipt_id = f"{stable_call_id}:{lead_id}:{normalized}"
+        # The same tool call arriving twice is a duplicate; a new tool call is a
+        # new decision, even one the patient already made earlier in the call.
+        # Keying on call and status alone dropped every correction: link, then
+        # "not interested", then link again lost the final link, and a callback
+        # moved from ten to nine kept ten. Reports with no tool call id (the
+        # post-call backup, direct requests) keep the per-call key.
+        receipt_id = (
+            f"tool:{tool_call_id}:{lead_id}:{normalized}"
+            if tool_call_id
+            else f"{stable_call_id}:{lead_id}:{normalized}"
+        )
         receipt = conn.execute(
             "insert into provider_events(provider,event_id,event_type,payload) "
             "values('vapi',%s,'lead-status',%s) on conflict(provider,event_id) do nothing returning id",
@@ -303,11 +323,32 @@ def report_lead_status(
             ).fetchone()
             if lead["sms_opt_out"] or suppressed or not lead["phone_e164"]:
                 raise ValueError("the lead cannot receive an SMS booking link")
-            conn.execute(
-                "insert into notification_log(lead_id,notification_type,channel,status,payload) "
-                "values(%s,'sms_booking_link','sms','queued',%s)",
-                (lead_id, json.dumps({"booking_link_url": settings["booking_link_url"]})),
-            )
+            # Held for two minutes so we act on the patient's last word on the
+            # call: the sender drops the text if the lead has moved off
+            # booking_link_sent by then. One link per call, so asking again after
+            # a change of mind re-arms this call's text instead of adding another.
+            existing = conn.execute(
+                "select id,status from notification_log where lead_id=%s "
+                "and notification_type='sms_booking_link' and payload->>'call_id'=%s "
+                "order by id desc limit 1",
+                (lead_id, stable_call_id),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    "insert into notification_log(lead_id,notification_type,channel,status,payload,"
+                    "next_attempt_at) values(%s,'sms_booking_link','sms','queued',%s,"
+                    "now()+interval '2 minutes')",
+                    (lead_id, json.dumps({
+                        "booking_link_url": settings["booking_link_url"],
+                        "call_id": stable_call_id,
+                    })),
+                )
+            elif existing["status"] == "skipped":
+                conn.execute(
+                    "update notification_log set status='queued',error=null,"
+                    "next_attempt_at=now()+interval '2 minutes',updated_at=now() where id=%s",
+                    (existing["id"],),
+                )
             # Sending the link is the end of our outreach: we cannot tell whether the
             # patient booked until Stride is re-enabled, so we stop chasing them.
             conn.execute(

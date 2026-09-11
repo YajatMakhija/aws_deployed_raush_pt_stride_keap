@@ -41,6 +41,7 @@ async def lead_status(request: Request):
             trace,
             lead_id=str(lead_id),
             status=str(status),
+            tool_call_id=tool_call_id,
             call_id=parsed.call_id or (
                 str(parsed.arguments["call_id"]) if parsed.arguments.get("call_id") else None
             ),
