@@ -178,8 +178,13 @@ def report_lead_status(
     callback_type: str | None = None,
     delay_minutes: str | int | None = None,
     callback_datetime_iso: str | None = None,
+    source: str = "tool",
 ) -> str:
-    """Apply the direct Vapi lead-status contract with per-call/status idempotency."""
+    """Apply the direct Vapi lead-status contract with per-call/status idempotency.
+
+    ``source`` labels the lead's history: "tool" when the agent reported during
+    the call, "call summary" when the post-call summary settled it instead.
+    """
     normalized = {
         "not_interested": "declined",
         "callback": "callback_scheduled",
@@ -255,9 +260,11 @@ def report_lead_status(
         }.get(normalized, "manual")
         if event:
             conn.execute(
-                "update outreach_events set status='delivered',settled_at=now(),settled_by='tool',"
+                "update outreach_events set status='delivered',settled_at=now(),settled_by=%s,"
                 "outcome=%s,updated_at=now() where id=%s",
-                (outcome, event["id"]),
+                # settled_by only allows worker/tool/webhook/sweeper; the post-call
+                # summary arrives on the end-of-call webhook.
+                ("tool" if source == "tool" else "webhook", outcome, event["id"]),
             )
 
         if normalized == "booked":
@@ -267,7 +274,7 @@ def report_lead_status(
             ).fetchone()
             if not appointment:
                 raise ValueError("booked requires a confirmed appointment")
-            mark_booked(conn, lead_id, "tool")
+            mark_booked(conn, lead_id, source)
         elif normalized == "declined":
             conn.execute(
                 "update leads set status='declined',cadence_state='terminated',"
@@ -279,7 +286,7 @@ def report_lead_status(
                 "where lead_id=%s and status='planned'",
                 (lead_id,),
             )
-            record_status(conn, lead_id, lead["status"], "declined", "tool", note or "declined")
+            record_status(conn, lead_id, lead["status"], "declined", source, note or "declined")
         elif normalized == "callback_scheduled":
             tz, hours, holidays = _practice_clock(conn, lead_id)
             now = datetime.now(UTC)
@@ -307,7 +314,7 @@ def report_lead_status(
             )
             _schedule_callback(conn, lead_id, callback_utc)
             record_status(
-                conn, lead_id, lead["status"], "callback_scheduled", "tool", note or "callback requested"
+                conn, lead_id, lead["status"], "callback_scheduled", source, note or "callback requested"
             )
         elif normalized == "booking_link":
             settings = conn.execute(
@@ -362,7 +369,7 @@ def report_lead_status(
                 (lead_id,),
             )
             record_status(
-                conn, lead_id, lead["status"], "booking_link_sent", "tool", note or "booking link requested"
+                conn, lead_id, lead["status"], "booking_link_sent", source, note or "booking link requested"
             )
         elif normalized == "transferred_human":
             # A person has taken over the conversation, so automated outreach is done.
@@ -378,7 +385,7 @@ def report_lead_status(
                 (lead_id,),
             )
             record_status(
-                conn, lead_id, lead["status"], "transferred_human", "tool", note or "transferred"
+                conn, lead_id, lead["status"], "transferred_human", source, note or "transferred"
             )
         elif normalized == "no_answer":
             conn.execute(
@@ -417,7 +424,7 @@ def report_lead_status(
                     (lead["phone_e164"],),
                 )
             record_status(
-                conn, lead_id, lead["status"], "do_not_contact", "tool", note or "do not contact"
+                conn, lead_id, lead["status"], "do_not_contact", source, note or "do not contact"
             )
         else:
             reason = note or (
@@ -429,7 +436,7 @@ def report_lead_status(
                 "review_flagged_at=now(),status_changed_at=now() where id=%s",
                 (reason, lead_id),
             )
-            record_status(conn, lead_id, lead["status"], "needs_attention", "tool", reason)
+            record_status(conn, lead_id, lead["status"], "needs_attention", source, reason)
         conn.execute("update provider_events set processed_at=now() where id=%s", (receipt["id"],))
     trace.log("state_transition_applied", reported_status=normalized)
     return "recorded"

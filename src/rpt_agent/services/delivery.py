@@ -291,6 +291,15 @@ def _call_text_artifacts(message: dict) -> tuple[str | None, str | None]:
     )
 
 
+def _assistant_spoke(message: dict) -> bool:
+    """Whether Sarah said anything at all on the call."""
+    artifact = message.get("artifact") if isinstance(message.get("artifact"), dict) else {}
+    return any(
+        isinstance(item, dict) and item.get("role") == "bot" and str(item.get("message") or "").strip()
+        for item in artifact.get("messages") or []
+    )
+
+
 def _settle_from_structured_output(
     trace: WorkflowTrace, message: dict, *, lead_id: str, event_id: int, call_id: str
 ) -> str | None:
@@ -328,6 +337,7 @@ def _settle_from_structured_output(
             callback_type=result.get("callback_type"),
             delay_minutes=result.get("delay_minutes"),
             callback_datetime_iso=result.get("callback_datetime_iso"),
+            source="call summary",
         )
     except (TypeError, ValueError) as exc:
         with transaction() as conn:
@@ -365,6 +375,7 @@ def process_vapi_end_report(trace: WorkflowTrace, body: dict) -> str:
         raise ValueError("webhook cannot be associated with a lead, event, and call")
     mapped_outcome = outcome_from_ended_reason(ended)
     outcome: str | None = mapped_outcome
+    outcome_source: str | None = "webhook"
     if mapped_outcome == "manual":
         with transaction() as conn:
             event = conn.execute(
@@ -374,13 +385,24 @@ def process_vapi_end_report(trace: WorkflowTrace, body: dict) -> str:
         if not event or str(event["lead_id"]) != lead_id:
             raise ValueError("webhook lead and outreach event do not match")
         if event["status"] == "delivered" and event["outcome"]:
-            outcome = event["outcome"]
+            outcome, outcome_source = event["outcome"], "tool"
+        elif event["status"] in {"in_flight", "attempted"} and not _assistant_spoke(message):
+            # Sarah never spoke, so the only voice on the call was a recording or
+            # nobody at all: nothing on it can be the patient's decision. A
+            # carrier's "forwarded to voice mail" message ended as
+            # customer-ended-call, the summary read it as a decline, and the lead
+            # was closed. Count it as a missed call and let the cadence go on.
+            outcome = "no_answer"
+            apply_call_outcome(
+                trace, lead_id=lead_id, event_id=int(event_id), outcome=outcome, source="webhook"
+            )
         elif event["status"] in {"in_flight", "attempted"}:
             # The tool never reported. Fall back to the structured output so a
             # callback the patient was promised is not silently lost.
             outcome = _settle_from_structured_output(
                 trace, message, lead_id=lead_id, event_id=int(event_id), call_id=call_id
             )
+            outcome_source = "webhook" if outcome else None
         else:
             raise ValueError("answered call report cannot settle this outreach event")
     else:
@@ -416,9 +438,7 @@ def process_vapi_end_report(trace: WorkflowTrace, body: dict) -> str:
                 ended_at_raw,
                 outcome if outcome in {"voicemail", "no_answer"} else "human",
                 ended,
-                "tool"
-                if outcome and mapped_outcome == "manual"
-                else ("webhook" if outcome else None),
+                outcome_source,
                 transcript,
                 summary,
                 duration_seconds,
