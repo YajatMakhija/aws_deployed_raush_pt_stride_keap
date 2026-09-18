@@ -2,6 +2,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 
+from .agent.router import router as agent_router
 from .config import get_settings
 from .observability import configure_logging, trace_id_var
 from .routes import (
@@ -59,6 +60,7 @@ app = FastAPI(
 app.include_router(health_router)
 app.include_router(availability_router)
 app.include_router(dashboard_router)
+app.include_router(agent_router)
 app.include_router(appointments_router)
 app.include_router(leads_router)
 app.include_router(vapi_router)

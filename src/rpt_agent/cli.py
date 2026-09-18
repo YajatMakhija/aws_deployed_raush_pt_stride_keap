@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import httpx
 
+from .agent.terminal import run_terminal
 from .config import get_settings
 from .db import transaction
 from .observability import WorkflowTrace, configure_logging
@@ -191,6 +192,11 @@ def main() -> None:
     test_lead.add_argument("--last-name", default="Patient")
     test_lead.add_argument("--dob", default="1990-01-01")
     test_lead.add_argument("--consent-reference", required=True)
+    agent = subparsers.add_parser("agent", help="open the lead-scoped terminal assistant")
+    agent.add_argument("--api-url")
+    agent.add_argument("--lead", action="append", default=[])
+    agent.add_argument("--user-id", default="terminal-agent")
+    agent.add_argument("--email", default="terminal-agent@local.test")
     args = parser.parse_args()
     commands = {
         "migrate": migrate,
@@ -202,6 +208,12 @@ def main() -> None:
         )),
         "tick": lambda: print(json.dumps(run_tick(), indent=2)),
         "test-lead": lambda: create_test_lead(args),
+        "agent": lambda: run_terminal(
+            api_url=args.api_url,
+            initial_leads=args.lead,
+            user_id=args.user_id,
+            email=args.email,
+        ),
     }
     commands[args.command]()
 

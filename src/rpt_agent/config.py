@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     api_base_url: str = "http://localhost:8000"
     public_base_url: str = ""
     dashboard_api_token: str = ""
+    assistant_enabled: bool = False
+    assistant_requests_per_minute: int = Field(default=10, ge=1, le=60)
+    langsmith_tracing: bool = False
+    langchain_tracing_v2: bool = False
+    moonshot_api_key: str = ""
+    kimi_model: str = "kimi-k3"
+    kimi_phi_approved: bool = False
+    kimi_phi_approval_reference: str = ""
     vapi_base_url: str = "https://api.vapi.ai"
     vapi_api_key: str = ""
     vapi_assistant_id: str = ""
@@ -105,6 +113,21 @@ class Settings(BaseSettings):
                 f"{name} is required when its provider is real"
                 for name, value in required.items() if not value
             )
+        if service == "api" and self.assistant_enabled:
+            if self.langsmith_tracing or self.langchain_tracing_v2:
+                errors.append("LangChain/LangSmith tracing must be disabled for the assistant")
+            if not self.moonshot_api_key:
+                errors.append("MOONSHOT_API_KEY is required when the assistant is enabled")
+            if not self.kimi_model.strip():
+                errors.append("KIMI_MODEL is required when the assistant is enabled")
+            if deployment_env and not self.kimi_phi_approved:
+                errors.append("KIMI_PHI_APPROVED must be true for the production assistant")
+            if (deployment_env or self.kimi_phi_approved) and not (
+                self.kimi_phi_approval_reference.strip()
+            ):
+                errors.append(
+                    "KIMI_PHI_APPROVAL_REFERENCE is required for real-patient assistant use"
+                )
         if deployment_env:
             database_url = self.supabase_db_url.lower()
             if not any(
@@ -115,6 +138,8 @@ class Settings(BaseSettings):
                 errors.append("PUBLIC_BASE_URL must use HTTPS")
             if service == "api" and len(self.dashboard_api_token) < 32:
                 errors.append("DASHBOARD_API_TOKEN must contain at least 32 characters")
+            if self.log_level.upper() == "DEBUG":
+                errors.append("LOG_LEVEL must not be DEBUG in a deployed environment")
             if "your-ngrok-domain" in self.public_base_url:
                 errors.append("PUBLIC_BASE_URL still contains the example hostname")
             if self.mode("vapi") == "real" and self.vapi_webhook_secret == "local-vapi-secret":

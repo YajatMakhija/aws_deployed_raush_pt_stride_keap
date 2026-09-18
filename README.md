@@ -9,6 +9,7 @@ Compose profile for automated/local testing. Production cadence spreading is unc
 ```text
 src/rpt_agent/
   api.py                 FastAPI assembly and trace middleware
+  agent/                 read-only selected-lead assistant and terminal client
   routes/
     availability.py      POST /api/v1/tools/check-availability
     appointments.py      POST /api/v1/tools/create-appointment
@@ -91,6 +92,48 @@ set stride_booking_enabled = true
 from public.practices p
 where p.id = ps.practice_id and p.slug = 'rausch-pt';
 ```
+
+## Production staff assistant
+
+The staff assistant is disabled by default. It has no write/provider tools and sends only explicitly selected,
+redacted lead context to Kimi. Every authenticated request is durably audited in `dashboard_audit_log`; a
+Postgres advisory lock enforces the configured per-actor one-minute request limit across API processes.
+
+Before enabling it for real patients, obtain documented approval for Moonshot to process the intended patient
+data and record the non-secret agreement/security-review reference. Then configure:
+
+```dotenv
+APP_ENV=production
+ASSISTANT_ENABLED=true
+ASSISTANT_REQUESTS_PER_MINUTE=10
+LANGSMITH_TRACING=false
+LANGCHAIN_TRACING_V2=false
+MOONSHOT_API_KEY=<from the production secret store>
+KIMI_MODEL=kimi-k3
+KIMI_PHI_APPROVED=true
+KIMI_PHI_APPROVAL_REFERENCE=<contract-or-security-review-reference>
+```
+
+Do not set the last two values merely to bypass readiness. Until approval exists, leave the assistant disabled;
+the rest of the production API remains available. Apply migration `023`, rebuild, and require readiness before
+exposing the service:
+
+```powershell
+docker compose -f docker-compose.prod.yml run --rm api rpt migrate
+docker compose -f docker-compose.prod.yml up -d --build
+Invoke-RestMethod https://stride.aibolt.ai/ready
+```
+
+For an authorized operator with server access, open the terminal client inside the API container:
+
+```powershell
+docker compose -f docker-compose.prod.yml exec api `
+  rpt agent --api-url http://localhost:8000
+```
+
+The terminal uses `POST /api/v1/dashboard/assistant/stream` and prints redacted Server-Sent Event chunks as
+LangChain receives them from Kimi. The original `POST /api/v1/dashboard/assistant` JSON response remains
+available for non-streaming clients.
 
 For deterministic tests only, start the mock provider explicitly:
 

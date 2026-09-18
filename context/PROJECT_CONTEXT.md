@@ -1,6 +1,6 @@
 # RPT Agent — Complete Project Context and Handoff
 
-Last updated: 2026-09-10 (Asia/Calcutta)
+Last updated: 2026-09-17 (Asia/Calcutta)
 
 This is the durable context file for future Codex, Claude, and human development sessions. Read this file
 before changing the project. Update it whenever a material decision, schema migration, integration contract,
@@ -154,6 +154,10 @@ Do not expose mock-provider port 9000 through ngrok. Only API port 8000 is publi
 ```text
 src/rpt_agent/
   api.py                 FastAPI assembly and trace middleware
+  agent/
+    router.py            authenticated bounded JSON and SSE assistant contracts
+    service.py           selected-lead context loader and read-only Kimi/LangChain agent
+    terminal.py          in-memory interactive client that streams through FastAPI only
   routes/
     availability.py      direct live availability endpoint
     appointments.py      direct real appointment endpoint
@@ -180,7 +184,7 @@ src/rpt_agent/
   retry.py               bounded exponential backoff with jitter
   vapi_contract.py       current and legacy Vapi tool parsers/results
   mock_server.py         deterministic provider mocks
-  cli.py                 migrate/verify/seed/demo/test-lead/tick commands
+  cli.py                 migrate/verify/seed/demo/test-lead/tick/agent commands
   sftp_fixtures.py       local CSV fixture ingestion
 supabase/migrations/      ordered SQL schema migrations
 supabase/seed.sql         practice, cadence, templates, provider settings
@@ -238,10 +242,12 @@ Migrations currently present:
     pre-020 API/worker instances finish rolling over, and backfills concurrent legacy inserts.
 22. `022_deleted_cadence_versions.sql` — adds audited soft deletion for cadence versions, preserves deleted
     steps/templates, and replaces developer-facing local-override names with personalized-plan names.
+23. `023_assistant_audit_rate_limit.sql` — indexes durable assistant access auditing and per-actor rate checks.
 
-Migrations through 022 are applied to the currently configured hosted Supabase project. Migration 009 fixed a real
-end-to-end defect where a null `stride_location_timezone` caused `ZoneInfo(None)` during confirmation SMS
-delivery. Runtime delivery also falls back to the lead timezone and then `America/Los_Angeles`.
+Migrations through 022 are applied to the currently configured hosted Supabase project. Migration 023 exists
+locally and must be applied before enabling the production assistant. Migration 009 fixed a real end-to-end
+defect where a null `stride_location_timezone` caused `ZoneInfo(None)` during confirmation SMS delivery.
+Runtime delivery also falls back to the lead timezone and then `America/Los_Angeles`.
 
 ### Verified hosted Supabase snapshot (read-only, 2026-09-10)
 
@@ -299,10 +305,10 @@ Important database guarantees and semantics:
 
 ## Cadence and synthetic test mode
 
-Production business-hour spreading remains unchanged. Published cadence definitions are immutable versions;
-only a draft can change timing, order, channel, copy, or the per-step Enabled switch. Creating an editable
-draft clones the selected version, and activating it archives the previous global version. Renaming is metadata
-only and is allowed separately.
+Production business-hour spreading remains unchanged. Published cadence definitions remain versioned;
+timing, order, channel, and copy changes require a draft, while the per-step Enabled status can be changed
+directly on active or archived global versions. Creating an editable draft clones the selected version, and
+activating it archives the previous global version. Renaming is metadata only and is allowed separately.
 
 Global activation applies the new version only to leads whose cadence is still `pending` (unstarted). Leads
 already `active` or `paused` keep the `cadence_version_id` on their existing outreach and finish the version
@@ -315,6 +321,8 @@ planned cadence event by one common delta so the earliest remainder is one secon
 also handles an overdue same-time Day 0 event after a long call while preserving all original spacing. The
 worker claims at most one event per lead and waits while a call is unresolved, so another message cannot
 overtake the callback decision. The dashboard labels the standalone event as `Callback` rather than `Day —`.
+A corrected callback time replaces the earlier never-dispatched standalone callback instead of scheduling
+both; cadence steps and already-dispatched events remain untouched.
 
 Template Studio and Cadence Studio have separate responsibilities. Reusable templates have both cadence links
 null and remain freely editable/importable. Published cadence message wording stays locked in Template Studio
@@ -439,7 +447,9 @@ The assistant is Sarah, a concise Rausch PT patient coordinator. It:
 - Uses the exact confirmed date/time with `create_appointment`; patient identity/DOB are trusted static data,
   not model-supplied values.
 - Claims success only for confirmed/already-booked or confirmed-but-local-sync-pending responses.
-- Calls `update_lead_status` exactly once before ending an answered call.
+- Calls `update_lead_status` immediately after each confirmed patient decision or correction. Distinct tool
+  calls within one conversation are processed in order so the patient's last decision wins; retries of the
+  same tool call remain idempotent.
 - Distinguishes booked, declined, callback scheduled, booking link, transferred to a human, no answer, wrong
   person, calls-only opt-out, and global DNC.
 - Does not provide medical, insurance, billing, or pricing advice.
@@ -550,14 +560,22 @@ Legacy outcome spellings are mapped to these canonical statuses at the compatibi
 
 Rules:
 
-- Duplicate status delivery is claimed atomically with `call_id:lead_id:status`: an exact replay is ignored,
-  while a different status is processed under its own key. A confirmed booking remains terminal.
-- Callback requires a timezone-aware future time no more than 30 days away; a planned callback call is added.
+- Conversational tool reports are deduplicated by tool-call ID, so an exact retry is ignored while a later
+  tool call is treated as the patient's newer decision, even if it repeats an earlier status. Post-call
+  fallback and direct reports without a tool-call ID retain per-call/status idempotency. A confirmed booking
+  remains terminal.
+- Callback requires a timezone-aware future time no more than 30 days away. A newer callback replaces the
+  earlier pending standalone callback and preserves cadence ordering.
 - Booked requires a confirmed appointment and completes/skips the remaining cadence.
 - Declined terminates outreach without adding a channel opt-out.
 - Booking-link status queues the existing durable SMS path only when consent/suppression checks allow it.
+  Delivery waits two minutes and is skipped if the lead's decision changes first; asking for the link again
+  within the same call re-arms the existing notification rather than creating a duplicate.
 - Human transfer completes the cadence; wrong-person/unknown states flag staff attention.
 - Day 9 inbound SMS `CALL` records a callback request.
+- If the agent never spoke during a connected carrier/voicemail recording, the call settles as `no_answer`
+  rather than trusting a misleading post-call summary. Summary-derived decisions are labelled as webhook/call
+  summary decisions in history, not as conversational tool decisions.
 
 ## Observability and debugging
 
@@ -619,10 +637,11 @@ applied, and both idempotent mock deliveries completed.
 
 ## Test and quality status
 
-Latest verified local result on 2026-09-10 at backend `3fa829d` and frontend `e77827d`:
+Latest verified local result on 2026-09-17 at backend `8e40c4e` plus the current agent worktree, and frontend
+`fcde2c1`:
 
 ```text
-backend: 98 passed, 3 skipped; Ruff all checks passed
+backend: 130 passed, 3 skipped; Ruff all checks passed; git diff --check passed
 frontend: TypeScript check passed; Vinext production build passed
 frontend lint: passed
 development and production Compose configuration: valid
@@ -630,8 +649,8 @@ configured Supabase migration registry: all 23 entries through 022 present
 ```
 
 The three skipped tests are optional integration/real-provider tests requiring explicit environment values,
-including `TEST_DATABASE_URL` or provider sandbox credentials. Two dependency deprecation warnings currently
-come from Starlette/FastAPI test-client and Python 3.14 asyncio behavior; they are not application failures.
+including `TEST_DATABASE_URL` or provider sandbox credentials. Repeated dependency deprecation warnings come
+from Python 3.14 asyncio behavior; they are not application failures.
 
 Covered tests include:
 
@@ -650,6 +669,10 @@ Covered tests include:
 - Direct availability, appointment, and lead-status route contracts, including flat and Vapi-wrapped requests,
   trusted transport IDs, fail-closed authentication, and conversational errors.
 - Real Stride camel-case availability parsing and pre-production migration/gate contracts.
+- Lead-assistant authentication, fail-closed enablement, UUID/message limits, three-lead selection,
+  selected-ID-only SQL, unloaded-lead refusal, multi-lead clarification, PHI approval, Kimi payload redaction,
+  durable audit/rate checks, production configuration validation, SSE chunking/redaction, and terminal
+  selection/streaming/cancellation commands.
 
 A read-only live Stride availability contract check passed using the supplied demo access material. It made no
 patient, case, appointment, call, SMS, or Keap write. The live response established that availability returns
@@ -671,6 +694,13 @@ Verify:
 Invoke-RestMethod http://localhost:8000/health
 Invoke-RestMethod http://localhost:8000/ready
 docker compose ps
+```
+
+Run the terminal-only lead assistant after configuring `MOONSHOT_API_KEY`; leave `KIMI_PHI_APPROVED=false`
+until real-patient use is formally approved:
+
+```powershell
+rpt agent --api-url http://localhost:8000
 ```
 
 Start the reserved ngrok domain:
@@ -724,16 +754,35 @@ npm.cmd run build
 
 ## Current Git state at this handoff
 
-- Backend `F:\rpt\aws_deployed_raush_pt_stride_keap`: branch `main`, HEAD `3fa829d`, aligned with
+- Backend `F:\rpt\aws_deployed_raush_pt_stride_keap`: branch `main`, HEAD `8e40c4e`, aligned with
   `origin/main` before this context-only edit.
-- Frontend `F:\rpt\rpt_frontend`: branch `new-changes`, HEAD `e77827d`. That commit also matches
-  `origin/main`, while the local branch reports 13 commits ahead of its configured `origin/new-changes`
-  upstream. Do not rewrite or retarget the branch without the user's direction.
-- The 2026-09-10 pull left both repositories clean. This context refresh is the only intentional post-pull
-  source-tree change.
+- Frontend `F:\rpt\rpt_frontend`: branch `main`, HEAD `fcde2c1`, aligned with `origin/main` and clean.
+- The merged feature branches remain available locally and remotely; neither was deleted or rewritten.
+- The 2026-09-17 update used the complete Git runtime bundled with GitHub Desktop because the standalone Git
+  installation was missing its HTTPS remote helper. Repository remotes were not changed.
 
 ## Known limitations and next work
 
+- The staff assistant is terminal-only. It has no frontend entry point, persistent chat, business-data write
+  tools, provider tools, arbitrary SQL, Supabase MCP, or Supabase Data API access. The frontend drag/drop
+  interaction is deferred; its only write is protected access auditing.
+- `ASSISTANT_ENABLED` and `KIMI_PHI_APPROVED` default false. Production readiness also requires a non-secret
+  approval reference. No public Moonshot healthcare/BAA commitment was verified in this session, so do not
+  enable real-patient export until contractual/privacy/security review is complete.
+- This workstation has a `MOONSHOT_API_KEY` only in the git-ignored environment. A no-lead dashboard-feature
+  smoke test passed through terminal, FastAPI, LangChain streaming, and Kimi without sending patient context.
+- Assistant request limiting is correctly serialized per claimed actor, but dashboard authentication still
+  uses one shared token and trusts caller-supplied actor headers. A token holder can claim another actor and
+  bypass per-actor limits/audit attribution; bind actor identity to the authenticated session before broad
+  multi-operator production use.
+- A canceled terminal stream now exits cleanly, but the already-started upstream Kimi request may continue
+  until its HTTP attempt settles. Treat cancellation as a UI/history action, not a guaranteed cost cancel.
+- Selected-lead context currently loads six related datasets before streaming. The tested synthetic record
+  produced about 9.3k context characters and roughly four seconds of pre-stream database latency; introduce
+  question-specific context subsets if production latency/cost measurements justify the added branching.
+- One separate read process hit the five-second database-pool acquisition timeout immediately after the
+  12-request concurrency probe; an immediate retry succeeded. Monitor Supabase pooler capacity under
+  multi-actor bursts because the per-actor limiter does not cap total service concurrency.
 - Real Stride appointment creation is implemented but remains gated off: live
   `stride_booking_enabled=false`. The live appointment-type ID is `8`, while the sandbox migration/README
   describes `1452`; reverify the correct environment-specific Initial Evaluation ID before enabling writes.
@@ -758,6 +807,10 @@ npm.cmd run build
   deployment production-ready.
 - Before production PHI, complete vendor agreements, production security review, secret management, database
   backup/restore validation, alerting, and log-shipping review.
+- The frontend declares Node 22.x, while this workstation currently runs Node 26.3.0. Validation passes after
+  a clean lockfile install, but use Node 22 for supported development and CI. The install also reports four
+  high-severity dependency advisories; review `npm audit` output and upgrade deliberately rather than applying
+  a forced dependency rewrite.
 
 ## Rules for future Codex or Claude sessions
 
@@ -777,6 +830,63 @@ npm.cmd run build
 
 Append entries newest first. Include date, decision/change, migrations, configuration impact, validation, and
 known follow-up. Do not include secrets or patient/tester identifiers.
+
+### 2026-09-17 — Streaming terminal assistant
+
+- Added authenticated `POST /api/v1/dashboard/assistant/stream` using Server-Sent Events while preserving the
+  existing JSON endpoint. The terminal now prints LangChain `stream_mode="messages"` output incrementally and
+  retains the completed answer in process memory only after a clean `done` event.
+- Response segments are buffered only until safe complete-token boundaries and redacted before emission,
+  providing visible word-level progress while preventing
+  chunk boundaries from bypassing phone, email, DOB-label, credential, or recording-reference filtering.
+  Mid-stream failures are not added to conversation history; Ctrl+C now cancels the terminal response without
+  a traceback, and each request receives a unique trace ID.
+- No dependency, schema, configuration, provider tool, write capability, or frontend change was added.
+  Validation: `130 passed, 3 skipped`, Ruff and `git diff --check` passed. PowerShell received 292 SSE deltas
+  over 13.6 seconds in the final live synthetic-lead probe; prompt-injection, sensitive-field, mutation,
+  factual-state, and 12-request concurrency probes passed, with the rate gate returning 10 successes and two
+  HTTP 429 responses as configured. Migration 023 remains unapplied.
+
+### 2026-09-17 — Terminal-first selected-lead assistant
+
+- Added authenticated `POST /api/v1/dashboard/assistant` and an `rpt agent` terminal client. Conversations
+  remain process-local and may contain zero to three unique selected lead UUIDs; the client never connects to
+  Supabase directly.
+- The read-only LangChain `create_agent` uses Kimi through `ChatOpenAI` with low reasoning effort, one retry,
+  and bounded timeouts. It has no tools. SQL is fixed and restricted to supplied UUIDs, while model context
+  excludes contact/DOB/provider/recording fields and redacts those values from free text.
+- A post-implementation audit moved the PHI gate ahead of patient-detail queries, bounded every context text
+  field and response, aligned next-action selection with dashboard planned-first behavior, and made long
+  terminal conversations discard their oldest complete turns before request limits are reached.
+- Dashboard-feature questions skip patient context entirely. Prior chat is sent as an untrusted transcript
+  rather than incomplete assistant-role messages, preserving the role/content API contract while remaining
+  compatible with Kimi K3's preserved-reasoning history requirement.
+- Added fail-closed `ASSISTANT_ENABLED`, bounded per-actor rates, production PHI approval evidence checks,
+  explicit LangChain/LangSmith tracing rejection, durable metadata-only request auditing, Caddy request-size
+  protection, and readiness-gated production startup. Migration 023 adds only the audit lookup index; it has
+  not been applied remotely.
+- Added `MOONSHOT_API_KEY`, `KIMI_MODEL`, and fail-closed `KIMI_PHI_APPROVED` settings. No frontend, provider
+  configuration, patient/business-data write path, or external service state changed.
+- Validation: `125 passed, 3 skipped`, Ruff and dependency checks passed, and `git diff --check` passed. Both
+  the terminal command smoke test and a read-only selected-context query against a stored synthetic lead
+  passed; no live Kimi request ran because the API key is not configured.
+
+### 2026-09-17 — Repository sync and last-decision call handling
+
+- Fast-forwarded both local working folders to their current `origin/main`: backend `8e40c4e` and frontend
+  `fcde2c1`. The cadence timing/status PRs are merged; their feature branches were preserved.
+- Tool-call-level idempotency now lets later decisions in the same call supersede earlier ones while exact
+  tool retries remain harmless. Corrected callbacks replace the prior pending callback, and booking-link SMS
+  waits two minutes so a later decline, callback, transfer, or staff change can cancel it.
+- Calls where the assistant never spoke now settle as `no_answer`, preventing carrier or voicemail recordings
+  from being misclassified as the patient's decision. Summary-derived outcomes are identified separately from
+  decisions reported by the live conversational tool.
+- Flagged lead cards and the lead overview now show the recorded staff-attention reason instead of presenting
+  an unavailable next action.
+- No migration, provider configuration, or external service state changed. Validation after the pull: backend
+  `105 passed, 3 skipped` and Ruff passed; frontend ESLint, TypeScript, and Vinext production build passed after
+  restoring `node_modules` with `npm ci`. Node 26 produced the expected engine warning because the project
+  declares Node 22.x.
 
 ### 2026-09-10 — Inline statuses, exact test timing, and reliable callbacks
 

@@ -1,5 +1,8 @@
 # Replace with the subdomain you point at this EC2 instance.
 # Caddy obtains and renews the TLS certificate automatically.
 stride.aibolt.ai {
+    request_body /api/v1/dashboard/assistant {
+        max_size 64KB
+    }
     reverse_proxy api:8000
 }

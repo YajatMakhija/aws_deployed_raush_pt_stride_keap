@@ -11,6 +11,11 @@ services:
       - "8000"
     volumes:
       - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   # Exactly one worker: the rate governors are process-local.
   worker:
@@ -23,7 +28,7 @@ services:
       - ./logs:/app/logs
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.4-alpine
     container_name: stride-caddy
     restart: unless-stopped
     ports:
@@ -35,7 +40,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   caddy_data:

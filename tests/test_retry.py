@@ -38,6 +38,13 @@ def test_stride_booking_requires_explicit_verified_configuration():
     assert "default false" in sql
 
 
+def test_assistant_audit_rate_limit_index_is_migrated():
+    sql = Path("supabase/migrations/023_assistant_audit_rate_limit.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "dashboard_audit_log(actor_id,action,created_at desc)" in sql
+
+
 def test_deployed_environments_allow_accelerated_test_mode():
     """TEST_MODE only compresses the cadence clock, so a deployed box may enable it."""
     settings = Settings(app_env="production", test_mode=True)
@@ -75,3 +82,27 @@ def test_preproduction_rejects_incomplete_real_provider_configuration():
     assert "TWILIO_FROM_NUMBER still contains the example value" in errors
     assert "KEAP_HANDOFF_URL must use HTTPS" in errors
     assert "KEAP_HANDOFF_SECRET must be replaced outside local development" in errors
+
+
+def test_production_assistant_requires_phi_approval_evidence():
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        assistant_enabled=True,
+        moonshot_api_key="configured",
+        supabase_db_url="postgresql://db.invalid/postgres?sslmode=require",
+        dashboard_api_token="x" * 32,
+        slot_token_secret="configured-slot-secret",
+    )
+    errors = settings.runtime_errors("api")
+    assert "KIMI_PHI_APPROVED must be true for the production assistant" in errors
+    assert "KIMI_PHI_APPROVAL_REFERENCE is required for real-patient assistant use" in errors
+
+    approved = settings.model_copy(
+        update={"kimi_phi_approved": True, "kimi_phi_approval_reference": "security-review-123"}
+    )
+    assert not any("KIMI_" in error or "MOONSHOT_" in error for error in approved.runtime_errors("api"))
+    traced = approved.model_copy(update={"langsmith_tracing": True})
+    assert "LangChain/LangSmith tracing must be disabled for the assistant" in (
+        traced.runtime_errors("api")
+    )
