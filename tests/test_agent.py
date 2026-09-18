@@ -390,19 +390,30 @@ async def test_phi_approval_requires_a_reference_before_database(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_no_leads_refuses_non_dashboard_questions_without_calling_kimi(monkeypatch):
+async def test_no_leads_asks_the_model_without_patient_context(monkeypatch):
+    """"What is a cadence?" must reach the model; the keyword gate used to refuse it."""
     monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
+    seen = {}
+
+    def fake_create_agent(**kwargs):
+        class Agent:
+            async def ainvoke(self, payload):
+                seen["messages"] = payload["messages"]
+                from langchain_core.messages import AIMessage
+                return {"messages": [AIMessage(content="A cadence is the 14-day outreach schedule.")]}
+        return Agent()
+
+    monkeypatch.setattr(agent_service, "create_agent", fake_create_agent)
     monkeypatch.setattr(
-        agent_service,
-        "create_agent",
-        lambda **_: pytest.fail("Kimi must not run for a non-dashboard question without leads"),
+        agent_service, "load_lead_context", lambda *a, **k: pytest.fail("no patient data without a lead")
     )
     get_settings.cache_clear()
     try:
         answer = await agent_service.answer_question(
-            [{"role": "user", "content": "What is the weather?"}], [], "terminal"
+            [{"role": "user", "content": "What is a cadence?"}], [], "terminal"
         )
-        assert answer.startswith("No lead is loaded.")
+        assert answer.startswith("A cadence is")
+        assert "selected-lead" not in " ".join(str(m) for m in seen["messages"]).lower()
     finally:
         get_settings.cache_clear()
 

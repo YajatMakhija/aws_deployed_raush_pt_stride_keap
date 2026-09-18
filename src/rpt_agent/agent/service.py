@@ -33,6 +33,20 @@ Dashboard feature guide:
 - Global Cadence Studio: versioned outreach plans for future leads; active leads stay pinned to their run.
 - SMS Template Studio: reusable copy; published cadence messages remain locked until changed in a draft.
 - Lead workspace: Overview, Conversations, Cadence, Appointments, and History.
+
+How outreach works:
+- A cadence is the scheduled sequence of calls and texts a new lead receives. The standard cadence
+  runs 14 days with 8 steps: Day 0 call and text (introduction with the booking link), Day 1 text
+  (booking reminder), Day 3 call, Day 5 call and text (encouragement with the booking link), Day 9
+  text (reply CALL or use the booking link), Day 13 text (final reminder).
+- Calls are made by Sarah, the AI voice agent, only Monday to Friday 9am-5pm California time.
+- Outreach stops when the patient books, says they are not interested, asks not to be contacted,
+  or turns out to be the wrong person. A booking link request, a transfer to staff, or a callback
+  request is recorded on the lead; a callback moves the next call to the agreed time.
+- Board columns: New (not started), In Cadence (outreach running), Needs Attention (paused for a
+  staff decision, with the reason on the card), Booked, Closed (finished: booked, declined,
+  transferred, no response). A lead dragged to New restarts the cadence from Day 0.
+- Test mode (used during client testing) runs one cadence day per minute and ignores calling hours.
 """.strip()
 
 SYSTEM_PROMPT = f"""
@@ -451,14 +465,13 @@ def _prepare_question(
     refusal = unselected_lead_refusal(latest_question, identifier_contexts)
     if refusal:
         return settings, [], refusal
+    # With no lead loaded there is no patient data to protect, so every question
+    # goes to the model; the system prompt keeps it to dashboard topics. The
+    # keyword check used to refuse "What is a cadence?" outright.
     feature_question = _feature_question(latest_question)
-    if not lead_ids and not feature_question:
-        return settings, [], (
-            "No lead is loaded. I can only answer dashboard feature questions until you add one."
-        )
     contexts = (
         []
-        if feature_question
+        if feature_question or not lead_ids
         else load_lead_context(lead_ids, phi_approved=settings.kimi_phi_approved)
     )
     clarification = ambiguity_clarification(latest_question, contexts)
