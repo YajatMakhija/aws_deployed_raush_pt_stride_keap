@@ -11,8 +11,11 @@ services:
       - "8000"
     volumes:
       - ./logs:/app/logs
+    # Liveness only. /ready also reports 503 while Stride booking is switched
+    # off for the practice, which is a deliberate state here; gating Caddy on
+    # it took the whole site down.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
       timeout: 5s
       retries: 5
