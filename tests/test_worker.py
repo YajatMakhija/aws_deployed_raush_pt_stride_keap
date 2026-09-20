@@ -6,8 +6,10 @@ from rpt_agent.config import Settings, get_settings
 from rpt_agent.observability import WorkflowTrace
 from rpt_agent.providers import ProviderError
 from rpt_agent.worker import (
+    CADENCE_WORKER_LOCK_ID,
     CLAIM_SQL,
     Job,
+    cadence_worker_lock,
     compute_send_time,
     dispatch_job,
     format_phone,
@@ -18,7 +20,10 @@ from rpt_agent.worker import (
 
 def test_phone_normalization():
     assert format_phone("(949) 555-1212") == "+19495551212"
+    assert format_phone("+19495551212") == "+19495551212"
+    assert format_phone("19495551212") == "+19495551212"
     assert format_phone("bad") is None
+    assert format_phone("123") is None
 
 
 def test_existing_scheduler_stays_inside_business_day():
@@ -57,6 +62,44 @@ class _Result:
 
     def fetchall(self):
         return self.many
+
+
+class _LockConnection:
+    def __init__(self, acquired=True):
+        self.acquired = acquired
+        self.queries = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, query, params=None):
+        self.queries.append((query, params))
+        return _Result(one=(self.acquired,))
+
+
+def test_cadence_worker_lock_is_held_and_released(monkeypatch):
+    conn = _LockConnection()
+    monkeypatch.setattr("rpt_agent.worker.psycopg.connect", lambda *_args, **_kwargs: conn)
+
+    with cadence_worker_lock("postgresql://example", 5) as held:
+        assert held is conn
+
+    assert conn.queries == [
+        ("select pg_try_advisory_lock(%s)", (CADENCE_WORKER_LOCK_ID,)),
+        ("select pg_advisory_unlock(%s)", (CADENCE_WORKER_LOCK_ID,)),
+    ]
+
+
+def test_cadence_worker_lock_rejects_second_worker(monkeypatch):
+    conn = _LockConnection(acquired=False)
+    monkeypatch.setattr("rpt_agent.worker.psycopg.connect", lambda *_args, **_kwargs: conn)
+
+    with pytest.raises(RuntimeError, match="another cadence worker"):
+        with cadence_worker_lock("postgresql://example", 5):
+            pass
 
 
 class _CadenceConnection:

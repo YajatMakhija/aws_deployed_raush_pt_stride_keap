@@ -10,6 +10,7 @@ from .routes import (
     dashboard_router,
     health_router,
     leads_router,
+    n8n_router,
     twilio_router,
     vapi_router,
 )
@@ -61,6 +62,7 @@ app.include_router(availability_router)
 app.include_router(dashboard_router)
 app.include_router(appointments_router)
 app.include_router(leads_router)
+app.include_router(n8n_router)
 app.include_router(vapi_router)
 app.include_router(twilio_router)
 

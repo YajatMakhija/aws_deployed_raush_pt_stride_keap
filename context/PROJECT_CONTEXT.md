@@ -1,6 +1,6 @@
 # RPT Agent — Complete Project Context and Handoff
 
-Last updated: 2026-09-10 (Asia/Calcutta)
+Last updated: 2026-09-20 (Asia/Calcutta)
 
 This is the durable context file for future Codex, Claude, and human development sessions. Read this file
 before changing the project. Update it whenever a material decision, schema migration, integration contract,
@@ -124,7 +124,7 @@ run external write paths until the runtime values, provider access, and Stride b
 ## Current service topology
 
 ```text
-Hosted Supabase Postgres <---- API and cadence worker
+Hosted Supabase Postgres <---- API, cadence worker, and Sheet worker
                                   |
           +-----------------------+-----------------------+
           |                       |                       |
@@ -137,6 +137,7 @@ Local services:
 
 - API: `http://localhost:8000`; liveness `/health`, readiness `/ready`, docs `/docs`.
 - Worker: one long-running `rpt-worker` process, polling every 30 seconds by default.
+- Sheet worker: `rpt-sheet-worker` polls only n8n outbox rows every 30 seconds and never contacts patients.
 - Mock provider: `http://localhost:9000` only when Compose profile `mock` is explicitly selected.
 - Public API: the HTTPS value configured in `PUBLIC_BASE_URL`.
 
@@ -238,8 +239,15 @@ Migrations currently present:
     pre-020 API/worker instances finish rolling over, and backfills concurrent legacy inserts.
 22. `022_deleted_cadence_versions.sql` — adds audited soft deletion for cadence versions, preserves deleted
     steps/templates, and replaces developer-facing local-override names with personalized-plan names.
+23. `023_google_sheets_n8n_integration.sql` — adds signed Sheet-action idempotency, destination-routed n8n
+    outbox work, and stored authenticated dashboard transcript links.
+24. `024_free_text_lead_type.sql` — removes the old two-value `leads.lead_type` restriction so Sheet `Title`
+    and API `lead_type` can store the same validated free-text value.
 
-Migrations through 022 are applied to the currently configured hosted Supabase project. Migration 009 fixed a real
+Migrations through 022 are applied to the currently configured hosted Supabase project. The required Sheet
+tables and outbox routing from migration 023 exist, but its local filename is not registered in
+`schema_migrations`; `call_transcripts.transcript_link` is still missing. Migration 024 was applied on
+2026-09-19 and the old `leads_lead_type_check` no longer exists. Migration 009 fixed a real
 end-to-end defect where a null `stride_location_timezone` caused `ZoneInfo(None)` during confirmation SMS
 delivery. Runtime delivery also falls back to the lead timezone and then `America/Los_Angeles`.
 
@@ -734,6 +742,12 @@ npm.cmd run build
 
 ## Known limitations and next work
 
+- The configured database still lacks `call_transcripts.transcript_link`. The Sheet worker therefore cannot
+  build call-result snapshots, and existing n8n outbox rows that exhausted retries remain `dead`. Apply only
+  the approved column migration and explicitly requeue those rows before claiming call/SMS-to-Sheet E2E.
+- The corrected intake workflow must be re-imported and activated in n8n. The previously active copy was
+  observed resubmitting the unchanged Start cadence action once per minute; backend phone/idempotency guards
+  prevented duplicate leads/events, but the extra requests overwrote Action Status with Already started.
 - Real Stride appointment creation is implemented but remains gated off: live
   `stride_booking_enabled=false`. The live appointment-type ID is `8`, while the sandbox migration/README
   describes `1452`; reverify the correct environment-specific Initial Evaluation ID before enabling writes.
@@ -777,6 +791,291 @@ npm.cmd run build
 
 Append entries newest first. Include date, decision/change, migrations, configuration impact, validation, and
 known follow-up. Do not include secrets or patient/tester identifiers.
+
+### 2026-09-20 - Day 0 SMS Sheet trace
+
+- Read-only tracing confirmed the latest Google-Sheets test lead's Day 0 SMS was attempted but Twilio rejected
+  it with HTTP 400, so no `sms_messages` delivery row exists and the outreach event correctly settled failed.
+- The worker did create the n8n `sheet.outreach_failed` outbox job. Its first deliveries had temporary transport
+  failures, and it later reached n8n with HTTP 200 after the compressed cadence had already reached Day 3.
+- Sheet delivery rebuilds the latest lead snapshot at send time rather than preserving event-time state. The
+  delayed Day 0 job therefore carried the then-current Day 3 Call result, so Day 0 SMS was never visible in the
+  single current-status Sheet cells. No code, database, provider, Sheet, commit, or push change was made.
+
+### 2026-09-20 - Full local container rebuild for duplicate-row retest
+
+- Stopped and removed the API, outreach worker, and Sheet worker containers without deleting volumes, then
+  rebuilt/recreated all three so current source and `.env` values were loaded.
+- Confirmed API health/readiness and verified from the running Sheet worker that snapshots include
+  `action_request_id` and query the successful action request used to route duplicate-phone Sheet rows.
+- Before enabling real outbound, a PHI-free aggregate check found only synthetic-test overdue rows and no
+  non-test due rows or unresolved dispatches. The restarted outreach worker claimed zero jobs, so this restart
+  placed no call or SMS. A fresh Sheet submission is still required for the end-to-end retest.
+- No schema, environment, source, provider, commit, or push change was made by the restart.
+
+### 2026-09-20 - Duplicate-phone Sheet rows use submission identity
+
+- Changed intake's first Google write to target the exact trigger `row_number`, then changed intake results,
+  recovery results, and AWS status updates to match the unique `Action Request ID`.
+- Sheet snapshots now carry the latest successful cadence action request ID. A repeated person/phone can reuse
+  the backend lead while `Cadence restarted` and later call/SMS status update only the newly submitted row.
+- Existing Sheet columns, provider processing, retries, cadence fields, transcript links, and callback values
+  are unchanged. No migration or environment change was required; n8n Workflows 01-03 must be re-imported and
+  activated together.
+- Validation: `142 passed, 3 skipped`; Ruff and `git diff --check` passed. No commit or push was made.
+
+### 2026-09-20 - Sheet cadence trace, clean conversation URL, and readable callbacks
+
+- Traced a reported missing Sheet cadence through the database, outbox, Sheet worker, and n8n. The referenced
+  lead had been explicitly deleted through the audited dashboard delete path after its updates were delivered;
+  a later replacement Sheet lead was active and receiving updates normally.
+- Corrected the local `DASHBOARD_PUBLIC_URL` by removing `/login`. The shared dashboard-link builder now also
+  strips a trailing `/login`, and Sheet snapshots always derive the current stable conversation URL instead of
+  reusing a stale stored URL.
+- `Callback At` now renders in readable Pacific time, for example `Sep 21, 2026 at 9:00 AM PT`; the database
+  continues to retain the exact timezone-aware timestamp.
+- Added importable n8n Workflow 04 for staff-owned profile edits. It sends the Sheet Lead ID to the signed
+  `/lead-sync` endpoint, so the backend matches `leads.id` before updating. It ignores system-column changes,
+  writes nothing for a same-phone profile update, and replaces the Sheet Lead ID only when a changed phone
+  creates a new lead/cadence.
+- Rebuilt/recreated the API and Sheet worker, queued one Sheet-only repair snapshot for the active replacement
+  lead, and observed n8n HTTP 200 after the Google update node. No outreach was triggered by the repair.
+- Validation: `141 passed, 3 skipped`; Ruff and `git diff --check` passed. No commit or push was made.
+
+### 2026-09-20 - Automatic Sheet profile and phone-identity synchronization
+
+- Added signed `POST /api/v1/integrations/n8n/lead-sync` for rows that already have a Lead ID.
+- Same-phone edits refresh Sheet-owned name, email, DOB, location, and lead type on the existing database lead.
+- A changed, unused phone creates a new lead and full cadence, returns a replacement Lead ID, terminates the
+  old lead, and skips its still-planned outreach. An already-owned new phone returns a conflict instead of
+  creating a duplicate. In-flight provider work cannot be recalled.
+- n8n must use a separate profile-column trigger and stop without a Google write after `profile_updated`; only
+  the changed-phone response writes the new Lead ID/status/link, preventing a Sheet-trigger loop.
+- No schema or environment change was required. The endpoint reuses the existing intake HMAC credentials.
+- Validation: `138 passed, 3 skipped`; Ruff and `git diff --check` passed. No commit or push was made.
+
+### 2026-09-20 - Stable conversation links, zero-based Sheet days, and profile refresh
+
+- Sheet snapshots now derive the stable dashboard call-conversation URL from `DASHBOARD_PUBLIC_URL` even
+  before a transcript exists. Successful Start/Restart/Already-in-cadence actions enqueue a link-only snapshot;
+  intake and recovery workflow imports also write the same URL immediately from the returned Lead ID.
+- Backfilled the current Sheet row successfully. Three historical database leads no longer have matching Sheet
+  rows and correctly returned n8n HTTP 404; no patient outreach was triggered by the backfill.
+- Cadence Day now displays the actual configured `day_offset`, so the sequence is Day 0, 1, 3, 5, 9, and 13
+  instead of the prior off-by-one Day 1, 2, 4, 6, 10, and 14 labels.
+- Existing leads matched by practice and phone now refresh Sheet-owned name, email, DOB, location, and lead type
+  during valid Start/Restart submissions. Phone identity and consent are deliberately unchanged.
+- The active cadence already matches the requested days/channels. Its current SMS copy differs from the newly
+  supplied copy; publish that text through a new cadence version rather than mutating the active version in SQL.
+- Observed the older AWS worker racing the updated local Sheet worker and attempting n8n-destination outbox rows
+  as Keap work. Production rollout must replace/recreate API and workers together before enabling live traffic.
+- Validation: `135 passed, 3 skipped`; Ruff and `git diff --check` passed. No commit or push was made.
+
+### 2026-09-20 - Live Sheet/Vapi callback repair and test-lead rollout
+
+- Confirmed the missing call-day Sheet updates were deployment drift: Vapi end reports reached an older AWS
+  API that persisted call outcomes but did not enqueue `sheet.call_settled` rows. The current local callback
+  implementation performs settlement, transcript persistence, and the n8n outbox insert atomically.
+- Synchronized the configured Vapi assistant so its end-of-call webhook and tools target the current public
+  ngrok API. A signed synthetic callback reached that URL, authenticated, and returned HTTP 200.
+- Recreated the API, Sheet worker, and outreach worker, then verified that they loaded current real-provider,
+  outbound, test, credential-presence, and runtime-validation settings.
+- Verified the AWS-to-n8n HMAC path with a non-contacting snapshot: n8n returned HTTP 200 and the outbox row
+  moved to delivered. The completed test cadence also delivered its final Day 14 snapshot.
+- Added optional Sheet/API `is_test` input and the temporary `N8N_SHEET_LEADS_AS_TEST` default. Both require
+  `TEST_MODE=true`; all existing Google-Sheets-sourced leads were marked test without changing active/paused
+  state. Disable both test flags after the current test window.
+- Vapi produced no transcript for the observed no-answer calls, so the transcript link correctly remained
+  empty. Added a regression test proving an answered report stores the dashboard link and enqueues the Sheet
+  update.
+- A separate provider issue remains: calls settled, but cadence SMS dispatches were rejected by Twilio with
+  HTTP 400. The account is active and the configured sender exists and is SMS-capable; no extra SMS was sent
+  while investigating.
+- Validation: full backend suite `131 passed, 3 skipped`; Ruff and `git diff --check` passed. No commit or push
+  was made.
+
+### 2026-09-20 — Intake owns Lead ID / Cadence started; Sheet webhook owns cadence columns
+
+- Sheet intake/recovery remains the only writer for `Lead ID` and command Action Status values
+  (`Cadence started`, restarted, already started, intake DNC).
+- AWS no longer enqueues `lead_started` / `lead_restarted` / `lead_dnc` sheet jobs after those actions.
+- `build_sheet_snapshot` omits `action_status` unless outreach set DNC or cadence completed, so Day N
+  updates no longer overwrite intake's Action Status with "Cadence started".
+- Day 1 (and later) Sheet rows still require a `call_settled` / SMS outbox delivery; missing those jobs was
+  why cadence columns stayed blank after start.
+- Tests: `tests/test_n8n_integration.py` updated; `plan.md` contract clarified.
+
+### 2026-09-19 - Call-to-Sheet test exposed deployment and n8n-auth drift
+
+- Read-only tracing confirmed the latest real Vapi end-of-call report was durably processed and the call was
+  settled as delivered with a callback outcome, but no `sheet.call_settled` outbox row was created.
+- The local API received no matching Vapi webhook and the local worker did not dispatch the call. The shared
+  Supabase database is also being consumed by the deployed AWS runtime, so that older runtime claimed and
+  settled the event without this branch's Sheet-outbox code. Deploy one consistent application version (or
+  isolate development data/workers) before claiming end-to-end behavior.
+- The latest local n8n outbox attempt was rejected with HTTP 401. The backend values
+  `N8N_SHEET_KEY_ID`/`N8N_SHEET_WEBHOOK_SECRET` must exactly match n8n's
+  `RPT_N8N_SHEET_KEY_ID`/`RPT_N8N_SHEET_WEBHOOK_SECRET`; do not weaken signed-webhook verification.
+- The transcript-link column is now present. Existing Docker containers were created before current provider
+  credentials were added, and a restart alone does not reload Compose `env_file`; recreate only deliberately,
+  because recreating the outreach worker with real outbound enabled can contact patients.
+- No database, n8n, Vapi, provider, or Sheet mutation was performed during this diagnosis.
+
+### 2026-09-19 - Restart finished Sheet leads through Start cadence
+
+- Changed Sheet `Start cadence` behavior for an existing practice-and-phone match that has already completed
+  or terminated: the API now safely clears only old planned/skipped work, resets the lead cadence state, and
+  materializes a fresh cadence instead of returning `restart_required`.
+- Existing active/paused cadences remain idempotent and return `already_started`; Do Not Contact, complete
+  channel opt-out, and unresolved in-flight/attempted outreach protections remain enforced.
+- The existing Lead ID is reused, the response action remains `start_cadence`, and the result is
+  `cadence_restarted`, allowing n8n to write the normal restarted status without creating a duplicate lead.
+- No schema, migration, environment, provider, or deployed runtime change was made. Validation: targeted n8n
+  integration tests `21 passed`; full backend suite `129 passed, 3 skipped`; Ruff and `git diff --check` passed.
+
+### 2026-09-19 - Stop repeated Sheet actions and harden callback snapshots
+
+- Added an `Action Status Empty?` IF node directly after the Google Sheets trigger. Non-empty statuses now end
+  the intake execution, preventing n8n's own Processing/final Sheet writes from resubmitting the same action.
+- Confirmed the live symptom without exposing patient data: 121 completed Start cadence commands arrived in
+  two hours, while the latest Sheet lead correctly retained one eight-event cadence rather than duplicates.
+- Fixed restart snapshot scoping to read the nested idempotency response envelope and made the local auth
+  bypass fail closed for staging/prod/preprod aliases as well as their long names.
+- Sheet snapshots and both n8n response workflows now display duplicate/replayed Start requests as
+  `Already in Cadence`; the Action Status gate still prevents that result from overwriting an existing status.
+- Local call/SMS testing is configured for real Vapi and Twilio with outbound enabled, while Stride and Keap
+  remain in mock mode and out of scope. Runtime configuration validation passes without exposing credentials.
+- Read-only runtime checks found the API ready, both workers running, patient outreach suspended, providers in
+  mock mode, six dead n8n outbox rows, and the required transcript-link column absent. No database/provider
+  mutation or real call/SMS was performed.
+- Validation: `128 passed, 3 skipped`; the focused provider/worker/n8n suite also passed (`32 passed`). Ruff,
+  Python compilation, all three importable n8n workflow graphs,
+  both Compose configurations, and `git diff --check` passed. No commit or push was made.
+
+### 2026-09-19 — Preserve every row in batched Google Sheet intake
+
+- Diagnosed an uploaded n8n intake where both the validation and response-preparation Code nodes used the
+  default `Run Once for All Items` mode but read only `$json` and returned one item. When a poll contained
+  multiple changed rows, only its first row reached AWS and the final Sheet update.
+- Updated the importable intake workflow to loop over every `$input.all()` entry, preserve `pairedItem`, match
+  the post-Google-update signing source by unique Phone Number, and match successful AWS responses by request
+  UUID with item-order fallback only for responses that have no body.
+- Added regression assertions that all Google writes still match by Phone Number and that no fragile
+  `$('Validate and Build Intake').item` lookup remains. Duplicate Phone Number cells remain unsupported because
+  phone is the explicitly selected sole Sheet identity.
+- Validation: all workflow Code-node JavaScript compiled; focused n8n tests passed (`17 passed`); the full
+  suite passed with explicit test-safe auth/outbound overrides (`125 passed, 3 skipped`); Ruff and
+  `git diff --check` passed. No n8n import/activation, Sheet write, provider contact, commit, or push occurred.
+
+### 2026-09-19 — Sheet intake repaired and finite n8n recovery
+
+- Confirmed from local API logs that Sheet intake was returning HTTP 500 because the configured database
+  still enforced `leads_lead_type_check`; the transaction rolled back, so no lead, cadence events, outbox job,
+  or Lead ID was created. With explicit approval, applied only migration 024 and verified the constraint is
+  absent and the migration is registered.
+- Changed the importable intake/recovery workflows so temporary failures progress through `Retrying 1/3` and
+  `Retrying 2/3`, then become `Error: backend unavailable after 3 attempts`. Permanent 4xx failures become an
+  immediate Error, and legacy stuck `Processing:` rows remain recoverable.
+- Retries preserve the same Action Request ID for idempotency and refresh Action Started At to space attempts.
+- Verified the latest recovered request completed with a Lead ID and atomically produced an active lead plus
+  eight planned outreach events. Started the missing outreach worker in development; it completed multiple
+  30-second ticks successfully with outbound disabled, so no provider contact was made.
+- Found that the Sheet worker cannot build its snapshot because `call_transcripts.transcript_link` is missing;
+  its outbox item remains retryable. Adding that previously planned column still requires explicit approval.
+- Fixed Sheet snapshot action-label parsing for the live idempotency response envelope so a later callback
+  does not blank `Action Status`. No workflow activation, provider contact, commit, or push was performed.
+- Validation: focused n8n integration tests passed (`16 passed`); full suite passed with explicit test-safe
+  auth/outbound overrides (`124 passed, 3 skipped`); Ruff and `git diff --check` passed.
+
+### 2026-09-19 — Free-text Sheet title and one-word names
+
+- Removed the Sheet intake requirement for a last name; a one-word Name now creates a lead with a null
+  `last_name`, while later Stride booking may still request missing patient details.
+- Made `title` and `lead_type` validated aliases for one stored `leads.lead_type` value. Both accept any
+  non-empty string up to 200 characters, and conflicting values are rejected.
+- Added migration 024 to remove only the old Physical Therapy/Wellness database check; no table, column, or
+  index was added, and the migration was not applied remotely.
+- Aligned the callback workflow and documentation with the actual Sheet headers `Cadence events` and `Outcome`.
+- Validation: focused n8n/dashboard/date tests passed (`42 passed`); the full suite passed with explicit
+  test-safe auth/outbound overrides (`123 passed, 3 skipped`); Ruff, workflow JSON/connection checks,
+  workflow JavaScript compilation, and `git diff --check` passed.
+
+### 2026-09-19 — Separate Sheet commands/statuses and relaxed intake labels
+
+- Replaced the mixed Sheet output model with one-purpose columns: staff owns `Action`; system results use
+  `Action Status`; `Cadence` identifies Call/SMS work; `Cadence Status` records the result.
+- Sheet DOB input is now documented and validated as `DD/MM/YYYY`, then normalized to ISO for the API.
+  Single-word names are accepted, and arbitrary non-empty Title text is accepted by the Sheet API.
+- No schema change was made. Because `leads.lead_type` still permits only Physical Therapy or Wellness,
+  arbitrary Title text remains Sheet-only until a separate database change is approved.
+- Updated the three n8n imports, backend snapshot contract, tests, and root integration plan. Provider traffic,
+  external workflow activation, database migration, commit, and push were not performed.
+- Validation: workflow JSON/node/connection checks and JavaScript compilation passed; focused integration and
+  date tests passed (`15 passed`); the full suite passed with explicit test-safe auth/outbound overrides
+  (`121 passed, 3 skipped`); Ruff, Python compilation, and `git diff --check` passed.
+
+### 2026-09-20 — Temporary Sheet leads-as-test flag
+
+- Added `N8N_SHEET_LEADS_AS_TEST`. When true (with `TEST_MODE=true`), Google Sheet Start cadence
+  marks leads `is_test` so the compressed test cadence applies. Turn both off when testing is done.
+- No database migration.
+
+### 2026-09-19 — Free-text title / lead_type aliases on n8n intake
+
+- `title` and `lead_type` are treated as the same field under either name; any non-empty string is
+  accepted on the n8n intake schema and stored on `leads.lead_type`.
+- Migration `024_free_text_lead_type.sql` drops `leads_lead_type_check`. It was added to the repo but
+  **not applied** pending explicit permission.
+
+### 2026-09-19 — Local-only n8n intake auth bypass
+
+- Added `N8N_INTAKE_AUTH_DISABLED` for local development testing when HMAC signing is hard to
+  reproduce from Postman/n8n. The flag is ignored/rejected when `APP_ENV` is production or
+  preproduction. Auth failure messages now name key/timestamp/signature causes.
+- No database changes.
+
+### 2026-09-19 — n8n lead actions work against live lead_action_requests shape
+
+- Live `lead_action_requests` uses text `request_id`/`practice_id`/`lead_id` and has no
+  `http_status`/`error_category` columns. Application code now writes string IDs and stores
+  `{http_status, body}` inside `response_body` so retries still replay correctly.
+- No database migration or schema change was applied.
+
+### 2026-09-19 — Accept DD-MM-YYYY date of birth on Sheet intake
+
+- Sheet/n8n intake and recovery now normalize Date Of Birth from `DD-MM-YYYY`, `DD/MM/YYYY`, `YYYY-MM-DD`, or
+  a Google Sheets date serial before signing the backend request.
+- The FastAPI n8n and dashboard lead schemas parse the same day-first formats via `parse_flexible_date`, then
+  store ISO dates. Future dates remain rejected.
+- Phone validation is unchanged: n8n Sheet workflows require a US/NANP number; the backend `format_phone`
+  helper accepts broader E.164-style input. Re-import the updated intake and recovery workflow JSON into n8n.
+- Validation: `tests/test_parsing.py`, n8n DD-MM-YYYY intake route test, and phone normalization test passed.
+
+### 2026-09-19 — Corrected importable n8n workflows
+
+- Rebuilt the three Google Sheets/n8n workflow exports with the supplied Sheet/tab and credential references,
+  Web Crypto HMAC code, correct five-minute recovery schedule, complete Sheet mappings, and no pinned data.
+- Per the latest client direction, every Google update operation now matches the exact Phone Number cell rather
+  than n8n row number. The AWS callback still uses Lead ID to locate the row because the backend snapshot does
+  not contain a phone, then uses that row's phone for the write. Phone values must therefore be unique.
+- No database migration, Supabase write, provider call, workflow activation, or external Sheet write was made.
+  Validation: all three JSON files parsed, node connections and JavaScript syntax passed, Web Crypto HMAC matched
+  the backend algorithm, and the n8n integration test module passed (12 tests).
+
+### 2026-09-18 — Google Sheets and n8n integration
+
+- Added a signed lead-action endpoint for Start, Restart, and Do Not Contact, with phone matching and durable
+  request UUID idempotency for safe retries after lost responses.
+- Added a separate Sheet worker and destination-routed outbox. Provider/cadence transactions enqueue lead IDs;
+  the worker rebuilds current state and sends signed snapshots to n8n for exact Lead ID matching.
+- Canonical transcripts now store an authenticated dashboard link. Real SMS events settle only from signed
+  Twilio callbacks; missing callbacks become review work instead of false delivery.
+- Added migration 023, Compose/config wiring, the n8n contract, and tests. No remote migration, provider call,
+  deployment, commit, or push was performed. Validation: 117 passed, 3 skipped; Ruff, compilation, and diff
+  checks passed. Production Compose validation still requires a local `.env` file.
+- Restored the root `plan.md` and added three credential-free n8n workflow JSON imports for Sheet intake,
+  stuck-action recovery, and the signed AWS-to-Sheet webhook. The supplied webhook path is configuration only;
+  it was not called during validation.
 
 ### 2026-09-10 — Inline statuses, exact test timing, and reliable callbacks
 
@@ -1057,3 +1356,43 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   Vapi/ngrok setup, Twilio credential decision, testing state, safety rules, and known limitations from the
   project-related conversation.
 - Established this file as the canonical handoff that future sessions must maintain.
+
+### 2026-09-20 — Safe Sheet duplicate and phone-change handling
+
+- Changed Sheet intake so a new row whose normalized phone already belongs to a practice lead returns
+  `409 lead_already_exists`; it does not update, restart, or link the existing lead, regardless of name.
+- Existing linked rows still update their own name and other profile fields when their normalized phone is
+  unchanged. Changing the phone now returns `409 phone_changed_needs_review` without mutating the lead,
+  creating a replacement, or changing its cadence.
+- Focused n8n integration validation passed: `33 passed`.
+
+### 2026-09-20 — Single cadence-worker claim guard and Sheet failure fallback
+
+- Added migration 025. Only workers that set claim protocol `v1` may move planned outreach to in-flight;
+  stale deployed workers can no longer claim patient-contact jobs.
+- A database trigger now creates the n8n outbox job whenever outreach becomes `failed` or `unknown`, so
+  permanent provider rejection is published even when the transition comes from older runtime code.
+- Applied migrations 023 and 025 to the configured Supabase database, rebuilt the local cadence/Sheet
+  workers, observed a Twilio HTTP 400 failure reach n8n with HTTP 200, and passed `43` focused tests.
+
+### 2026-09-20 - Final Google Sheets production review
+
+- Added a PostgreSQL advisory lock held for the cadence worker process lifetime. Updated deployments now
+  allow only one cadence worker to dispatch outreach, while migration 025 continues to reject stale workers.
+- Added and applied migration 026 so terminal outreach failures create Sheet outbox events only for leads
+  whose `source_system` is `google_sheets`.
+- Removed temporary diagnostic scripts. Full validation passed: `144 passed, 3 skipped`; Ruff and the
+  production Compose configuration passed.
+- The latest supplied n8n export remains a deployment blocker until its Sheet writes target a unique row,
+  inbound AWS webhook HMAC verification is restored, and the profile-sync signing placeholder is replaced
+  through a non-exported n8n secret/configuration mechanism.
+
+### 2026-09-20 - Production cleanup and live HMAC verification
+
+- Live n8n webhook authentication now rejects an invalid HMAC with HTTP 401 and accepts the backend-generated
+  HMAC, reaching the expected HTTP 404 lookup for a deliberately nonexistent Lead ID.
+- Removed the temporary Google Sheet `is_test` input and `N8N_SHEET_LEADS_AS_TEST` configuration. Production
+  startup now rejects `TEST_MODE=true` and disabled n8n intake authentication.
+- Added `Dockerfile.prod`; production images contain application code and migrations, not tests, fixtures, or
+  development reset SQL. Automated tests remain in the repository for CI and regression protection.
+- Final validation: `142 passed, 3 skipped`; Ruff and production Compose validation passed.

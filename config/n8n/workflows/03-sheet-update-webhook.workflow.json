@@ -1,0 +1,555 @@
+{
+    "name":  "RPT - AWS Status Updates to Google Sheet",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "httpMethod":  "POST",
+                                         "path":  "6c9192c3-ccbf-4530-aa31-88c4ba296d5b",
+                                         "responseMode":  "responseNode",
+                                         "options":  {
+                                                         "rawBody":  true
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3001",
+                      "name":  "AWS Sheet Update Webhook",
+                      "type":  "n8n-nodes-base.webhook",
+                      "typeVersion":  2.1,
+                      "position":  [
+                                       -980,
+                                       0
+                                   ],
+                      "webhookId":  "6c9192c3-ccbf-4530-aa31-88c4ba296d5b"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const input = $input.first();\nconst data = input.json;\nconst headers = Object.fromEntries(Object.entries(data.headers || {}).map(([key,value])=>[key.toLowerCase(),value]));\nconst reject = (authorized,status,error) => [{json:{authorized,validPayload:false,httpStatus:status,error}}];\nlet rawBody = null;\nif (typeof data.rawBody === 'string') rawBody = data.rawBody;\nelse if (input.binary?.data?.data) rawBody = Buffer.from(input.binary.data.data,'base64').toString('utf8');\nelse if (typeof data.body === 'string') rawBody = data.body;\nif (rawBody === null) return reject(false,401,'Raw request body unavailable');\nconst timestamp = String(headers['x-rpt-timestamp'] || '');\nconst received = String(headers['x-rpt-signature'] || '');\nconst keyId = String(headers['x-rpt-key-id'] || '');\nconst secret = $env.RPT_N8N_SHEET_WEBHOOK_SECRET;\nconst expectedKey = $env.RPT_N8N_SHEET_KEY_ID;\nif (!secret || !expectedKey) throw new Error('Missing webhook authentication configuration');\nconst fresh = /^\\d{10}$/.test(timestamp) && Math.abs(Math.floor(Date.now()/1000)-Number(timestamp)) <= 300;\nconst keyValid = keyId === expectedKey;\nconst signatureHex = received.startsWith('sha256=') ? received.slice(7) : '';\nlet signatureValid = false;\nif (/^[a-fA-F0-9]{64}$/.test(signatureHex)) {\n  if (!globalThis.crypto?.subtle) throw new Error('Web Crypto API is unavailable in this n8n instance');\n  const encoder = new TextEncoder();\n  const key = await globalThis.crypto.subtle.importKey('raw',encoder.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['verify']);\n  const signatureBytes = new Uint8Array(signatureHex.match(/.{2}/g).map(byte=>parseInt(byte,16)));\n  signatureValid = await globalThis.crypto.subtle.verify('HMAC',key,signatureBytes,encoder.encode(`${timestamp}.${rawBody}`));\n}\nif (!fresh || !keyValid || !signatureValid) return reject(false,401,'Unauthorized');\nlet payload;\ntry { payload = JSON.parse(rawBody); } catch { return reject(true,400,'Invalid JSON'); }\nif (!payload || typeof payload !== 'object' || Array.isArray(payload)) return reject(true,400,'Invalid payload');\nconst topLevelAllowed = new Set(['event_id','occurred_at','lead_id','action_request_id','sheet']);\nconst allowedFields = new Set(['action_status','cadence_day','cadence','cadence_status','transcript_link','callback_at']);\nconst validId = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 256;\nconst validOccurredAt = typeof payload.occurred_at === 'string' && Number.isFinite(Date.parse(payload.occurred_at));\nconst sheet = payload.sheet;\nconst validSheet = sheet && typeof sheet === 'object' && !Array.isArray(sheet) && Object.keys(sheet).length > 0 && Object.keys(sheet).every(key=>allowedFields.has(key) && (sheet[key] === null || (typeof sheet[key] === 'string' && sheet[key].length <= 50000)));\nconst validPayload = Object.keys(payload).every(key=>topLevelAllowed.has(key)) && validId(payload.event_id) && validOccurredAt && validId(payload.lead_id) && validId(payload.action_request_id) && validSheet;\nif (!validPayload) return reject(true,400,'Invalid payload');\nreturn [{json:{authorized:true,validPayload:true,httpStatus:200,error:'',event_id:payload.event_id.trim(),occurred_at:payload.occurred_at,lead_id:payload.lead_id.trim(),action_request_id:payload.action_request_id.trim(),sheet}}];"
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3002",
+                      "name":  "Verify AWS Request",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -740,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  2
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "authorized",
+                                                                                   "leftValue":  "={{ $json.authorized }}",
+                                                                                   "rightValue":  true,
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3003",
+                      "name":  "Authorized?",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       -500,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { ok: false, error: \u0027Unauthorized\u0027 } }}",
+                                         "options":  {
+                                                         "responseCode":  401
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3004",
+                      "name":  "Respond 401",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       -260,
+                                       220
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  2
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "valid-payload",
+                                                                                   "leftValue":  "={{ $json.validPayload }}",
+                                                                                   "rightValue":  true,
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3005",
+                      "name":  "Payload Valid?",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       -260,
+                                       -80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { ok: false, error: $json.error || \u0027Invalid payload\u0027 } }}",
+                                         "options":  {
+                                                         "responseCode":  400
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3006",
+                      "name":  "Respond 400",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       -20,
+                                       140
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "read",
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "filtersUI":  {
+                                                           "values":  [
+                                                                          {
+                                                                               "lookupColumn":  "Action Request ID",
+                                                                               "lookupValue":  "={{ $json.action_request_id }}"
+                                                                          }
+                                                                      ]
+                                                       },
+                                         "options":  {
+                                                         "returnAllMatches":  true
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3007",
+                      "name":  "Find Row by Lead ID",
+                      "type":  "n8n-nodes-base.googleSheets",
+                      "typeVersion":  4.6,
+                      "position":  [
+                                       -20,
+                                       -160
+                                   ],
+                      "alwaysOutputData":  true,
+                      "credentials":  {
+                                          "googleSheetsOAuth2Api":  {
+                                                                        "id":  "UWfIMNG3yiTc6FCt",
+                                                                        "name":  "Yajat_sheets"
+                                                                    }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const payload = $('Verify AWS Request').first().json;\nconst matches = $input.all().filter(item=>String(item.json['Action Request ID'] ?? '').trim() === payload.action_request_id);\nif (matches.length !== 1) return [{json:{lead_id:payload.lead_id,action_request_id:payload.action_request_id,event_id:payload.event_id,matchCount:matches.length,actionRequestId:''}}];\nconst row = matches[0].json;\nconst patch = payload.sheet;\nconst getValue = (key,column) => Object.prototype.hasOwnProperty.call(patch,key) ? (patch[key] ?? '') : (row[column] ?? '');\nconst actionRequestId = String(row['Action Request ID'] ?? '').trim();\nreturn [{json:{lead_id:payload.lead_id,action_request_id:payload.action_request_id,event_id:payload.event_id,matchCount:actionRequestId ? 1 : 0,actionRequestId,actionStatus:getValue('action_status','Action Status'),cadenceDay:getValue('cadence_day','Cadence Day'),cadenceEvents:getValue('cadence','Cadence events'),outcome:getValue('cadence_status','Outcome'),transcriptLink:getValue('transcript_link','Transcript Link'),callbackAt:getValue('callback_at','Callback At')}}];"
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3008",
+                      "name":  "Prepare Phone-Matched Update",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       220,
+                                       -160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  2
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "one-match",
+                                                                                   "leftValue":  "={{ $json.matchCount }}",
+                                                                                   "rightValue":  1,
+                                                                                   "operator":  {
+                                                                                                    "type":  "number",
+                                                                                                    "operation":  "equals"
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3009",
+                      "name":  "Exactly One Row?",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       460,
+                                       -160
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "update",
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "columns":  {
+                                                         "mappingMode":  "defineBelow",
+                                                         "value":  {
+                                                                       "Action Request ID":  "={{ $json.actionRequestId }}",
+                                                                       "Action Status":  "={{ $json.actionStatus }}",
+                                                                       "Cadence Day":  "={{ $json.cadenceDay }}",
+                                                                       "Cadence events":  "={{ $json.cadenceEvents }}",
+                                                                       "Outcome":  "={{ $json.outcome }}",
+                                                                       "Transcript Link":  "={{ $json.transcriptLink }}",
+                                                                       "Callback At":  "={{ $json.callbackAt }}"
+                                                                   },
+                                                         "matchingColumns":  [
+                                                                                 "Action Request ID"
+                                                                             ],
+                                                         "schema":  [
+                                                                        {
+                                                                            "id":  "Count",
+                                                                            "displayName":  "Count",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsReadOnly",
+                                                                            "displayName":  "IsReadOnly",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Keys",
+                                                                            "displayName":  "Keys",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Values",
+                                                                            "displayName":  "Values",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsFixedSize",
+                                                                            "displayName":  "IsFixedSize",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "SyncRoot",
+                                                                            "displayName":  "SyncRoot",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsSynchronized",
+                                                                            "displayName":  "IsSynchronized",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        }
+                                                                    ]
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3010",
+                      "name":  "Update System Columns by Phone",
+                      "type":  "n8n-nodes-base.googleSheets",
+                      "typeVersion":  4.6,
+                      "position":  [
+                                       700,
+                                       -260
+                                   ],
+                      "credentials":  {
+                                          "googleSheetsOAuth2Api":  {
+                                                                        "id":  "UWfIMNG3yiTc6FCt",
+                                                                        "name":  "Yajat_sheets"
+                                                                    }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { ok: true, lead_id: $(\u0027Prepare Phone-Matched Update\u0027).first().json.lead_id, event_id: $(\u0027Prepare Phone-Matched Update\u0027).first().json.event_id } }}",
+                                         "options":  {
+                                                         "responseCode":  200
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3011",
+                      "name":  "Respond 200",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       940,
+                                       -260
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  2
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "zero-match",
+                                                                                   "leftValue":  "={{ $json.matchCount }}",
+                                                                                   "rightValue":  0,
+                                                                                   "operator":  {
+                                                                                                    "type":  "number",
+                                                                                                    "operation":  "equals"
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3012",
+                      "name":  "No Rows?",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       700,
+                                       -40
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { ok: false, error: \u0027Lead ID or phone not found\u0027 } }}",
+                                         "options":  {
+                                                         "responseCode":  404
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3013",
+                      "name":  "Respond 404",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       940,
+                                       -20
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { ok: false, error: \u0027Duplicate Lead ID rows\u0027 } }}",
+                                         "options":  {
+                                                         "responseCode":  409
+                                                     }
+                                     },
+                      "id":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3014",
+                      "name":  "Respond 409",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       940,
+                                       100
+                                   ]
+                  }
+              ],
+    "connections":  {
+                        "AWS Sheet Update Webhook":  {
+                                                         "main":  [
+                                                                      [
+                                                                          {
+                                                                              "node":  "Verify AWS Request",
+                                                                              "type":  "main",
+                                                                              "index":  0
+                                                                          }
+                                                                      ]
+                                                                  ]
+                                                     },
+                        "Verify AWS Request":  {
+                                                   "main":  [
+                                                                [
+                                                                    {
+                                                                        "node":  "Authorized?",
+                                                                        "type":  "main",
+                                                                        "index":  0
+                                                                    }
+                                                                ]
+                                                            ]
+                                               },
+                        "Authorized?":  {
+                                            "main":  [
+                                                         [
+                                                             {
+                                                                 "node":  "Payload Valid?",
+                                                                 "type":  "main",
+                                                                 "index":  0
+                                                             }
+                                                         ],
+                                                         [
+                                                             {
+                                                                 "node":  "Respond 401",
+                                                                 "type":  "main",
+                                                                 "index":  0
+                                                             }
+                                                         ]
+                                                     ]
+                                        },
+                        "Payload Valid?":  {
+                                               "main":  [
+                                                            [
+                                                                {
+                                                                    "node":  "Find Row by Lead ID",
+                                                                    "type":  "main",
+                                                                    "index":  0
+                                                                }
+                                                            ],
+                                                            [
+                                                                {
+                                                                    "node":  "Respond 400",
+                                                                    "type":  "main",
+                                                                    "index":  0
+                                                                }
+                                                            ]
+                                                        ]
+                                           },
+                        "Find Row by Lead ID":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Prepare Phone-Matched Update",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                },
+                        "Prepare Phone-Matched Update":  {
+                                                             "main":  [
+                                                                          [
+                                                                              {
+                                                                                  "node":  "Exactly One Row?",
+                                                                                  "type":  "main",
+                                                                                  "index":  0
+                                                                              }
+                                                                          ]
+                                                                      ]
+                                                         },
+                        "Exactly One Row?":  {
+                                                 "main":  [
+                                                              [
+                                                                  {
+                                                                      "node":  "Update System Columns by Phone",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  }
+                                                              ],
+                                                              [
+                                                                  {
+                                                                      "node":  "No Rows?",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  }
+                                                              ]
+                                                          ]
+                                             },
+                        "Update System Columns by Phone":  {
+                                                               "main":  [
+                                                                            [
+                                                                                {
+                                                                                    "node":  "Respond 200",
+                                                                                    "type":  "main",
+                                                                                    "index":  0
+                                                                                }
+                                                                            ]
+                                                                        ]
+                                                           },
+                        "No Rows?":  {
+                                         "main":  [
+                                                      [
+                                                          {
+                                                              "node":  "Respond 404",
+                                                              "type":  "main",
+                                                              "index":  0
+                                                          }
+                                                      ],
+                                                      [
+                                                          {
+                                                              "node":  "Respond 409",
+                                                              "type":  "main",
+                                                              "index":  0
+                                                          }
+                                                      ]
+                                                  ]
+                                     }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "saveManualExecutions":  true,
+                     "callerPolicy":  "workflowsFromSameOwner"
+                 },
+    "versionId":  "303c5a30-7fb0-4ff8-c6f6-ae6998af3099",
+    "meta":  {
+                 "templateCredsSetupCompleted":  true
+             },
+    "tags":  [
+
+             ]
+}

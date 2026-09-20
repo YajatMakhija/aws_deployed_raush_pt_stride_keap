@@ -7,6 +7,7 @@ conversation still falls back to the summary.
 """
 import inspect
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 from rpt_agent.observability import WorkflowTrace
 from rpt_agent.services import delivery, lead_status
@@ -34,6 +35,8 @@ class Conn:
         self.statements.append((sql, params))
         if sql.startswith("select lead_id,status,outcome from outreach_events"):
             return Result({"lead_id": LEAD, "status": "attempted", "outcome": None})
+        if sql.startswith("insert into call_logs"):
+            return Result({"id": 9})
         return Result()
 
 
@@ -90,3 +93,47 @@ def test_a_real_conversation_still_falls_back_to_the_summary(monkeypatch):
 def test_summary_decisions_are_labelled_as_such():
     assert inspect.signature(lead_status.report_lead_status).parameters["source"].default == "tool"
     assert 'source="call summary"' in inspect.getsource(delivery._settle_from_structured_output)
+
+
+def test_answered_call_stores_dashboard_transcript_link_and_queues_sheet_update(monkeypatch):
+    conn = Conn()
+    queued = []
+
+    @contextmanager
+    def held():
+        yield conn
+
+    body = end_report([{"role": "bot", "message": "Hello"}])
+    body["message"]["artifact"]["transcript"] = "Assistant: Hello\nPatient: Hi"
+    monkeypatch.setattr(delivery, "transaction", held)
+    monkeypatch.setattr(delivery, "apply_call_outcome", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        delivery,
+        "_settle_from_structured_output",
+        lambda *args, **kwargs: "not_interested",
+    )
+    monkeypatch.setattr(
+        delivery,
+        "get_settings",
+        lambda: SimpleNamespace(dashboard_public_url="https://dashboard.example.test"),
+    )
+    monkeypatch.setattr(
+        delivery,
+        "enqueue_sheet_update",
+        lambda *args, **kwargs: queued.append(kwargs),
+    )
+
+    delivery.process_vapi_end_report(WorkflowTrace("test", "test"), body)
+
+    transcript_params = next(
+        params for sql, params in conn.statements if sql.startswith("insert into call_transcripts")
+    )
+    assert transcript_params[4] == (
+        f"https://dashboard.example.test/leads/{LEAD}/conversations/calls"
+    )
+    assert queued == [{
+        "lead_id": LEAD,
+        "event_type": "call_settled",
+        "source_key": "call-1:not_interested",
+        "outreach_event_id": 7,
+    }]

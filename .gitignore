@@ -66,3 +66,4 @@ Desktop.ini
 # ---- Local-only scratch ---------------------------------------------
 refrences_git_clone/
 scratch/
+.gstack/

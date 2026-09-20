@@ -4,6 +4,12 @@ from rpt_agent.services.delivery import apply_twilio_message_status
 class _Result:
     rowcount = 1
 
+    def __init__(self, one=None):
+        self.one = one
+
+    def fetchone(self):
+        return self.one
+
 
 class _Connection:
     def __init__(self):
@@ -11,6 +17,15 @@ class _Connection:
 
     def execute(self, query, params):
         self.queries.append((query, params))
+        if query.startswith("update sms_messages"):
+            return _Result({
+                "lead_id": "lead-1",
+                "outreach_event_id": 7,
+                "delivery_status": "delivered",
+                "failure_reason": None,
+            })
+        if "returning oe.id,oe.lead_id" in query:
+            return _Result({"id": 7, "lead_id": "lead-1"})
         return _Result()
 
 
@@ -21,6 +36,21 @@ def test_twilio_delivery_updates_are_durable_and_forward_only():
         {"MessageSid": "SM-test", "MessageStatus": "delivered"},
     )
     assert matched == 3
-    assert len(conn.queries) == 3
-    assert all("status='delivered'" in query for query, _params in conn.queries)
-    assert all(params[-1] == "SM-test" for _query, params in conn.queries)
+    assert len(conn.queries) == 5
+    assert all("status='delivered'" in query for query, _params in conn.queries[:3])
+    assert all(params[-1] == "SM-test" for _query, params in conn.queries[:3])
+    assert "update outreach_events" in conn.queries[3][0]
+    assert "destination" in conn.queries[4][0]
+
+
+def test_older_failed_callback_cannot_regress_a_delivered_outreach_event():
+    conn = _Connection()
+    apply_twilio_message_status(
+        conn,
+        {"MessageSid": "SM-test", "MessageStatus": "failed", "ErrorCode": "30001"},
+    )
+    event_params = conn.queries[3][1]
+    # The fake SMS update returns its already-forward delivery state. The event
+    # must follow that current database truth, not the older callback payload.
+    assert event_params[0] == "delivered"
+    assert event_params[1] == "delivered"
