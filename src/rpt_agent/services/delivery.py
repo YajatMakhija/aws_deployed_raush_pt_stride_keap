@@ -10,6 +10,7 @@ from ..retry import retry_delay_seconds
 from ..usage_report import record_test_usage
 from ..vapi_contract import extract_vapi_context, outcome_from_ended_reason
 from .lead_status import apply_call_outcome
+from .sheet_sync import dashboard_call_link, enqueue_sheet_update
 
 # The patient's last word on the call wins. A booking link waits two minutes
 # after it is requested; if by then the lead is no longer booking_link_sent
@@ -59,7 +60,7 @@ def process_pending_integrations(
             )
         outbox = conn.execute(
             "select id,payload,attempts from integration_outbox "
-            "where status='pending' and next_attempt_at<=now() "
+            "where destination='keap' and status='pending' and next_attempt_at<=now() "
             "order by id limit 20 for update skip locked"
         ).fetchall()
         for row in outbox:
@@ -414,7 +415,7 @@ def process_vapi_end_report(trace: WorkflowTrace, body: dict) -> str:
             source="webhook",
         )
     with transaction() as conn:
-        conn.execute(
+        call_log = conn.execute(
             "insert into call_logs(outreach_event_id,lead_id,vapi_call_id,dialed_at,ended_at,"
             "answer_state,ended_reason,outcome_source,transcript_text,summary_text,"
             "duration_seconds,cost) "
@@ -429,7 +430,7 @@ def process_vapi_end_report(trace: WorkflowTrace, body: dict) -> str:
             "summary_text=coalesce(excluded.summary_text,call_logs.summary_text),"
             "duration_seconds=greatest(call_logs.duration_seconds,excluded.duration_seconds),"
             "cost=coalesce(excluded.cost,call_logs.cost),"
-            "ended_at=coalesce(excluded.ended_at,call_logs.ended_at)",
+            "ended_at=coalesce(excluded.ended_at,call_logs.ended_at) returning id",
             (
                 int(event_id),
                 lead_id,
@@ -446,12 +447,31 @@ def process_vapi_end_report(trace: WorkflowTrace, body: dict) -> str:
                 started_at_raw,
                 call_cost,
             ),
-        )
+        ).fetchone()
+        settings = get_settings()
+        transcript_link = dashboard_call_link(lead_id, settings) if transcript else None
+        if transcript:
+            conn.execute(
+                "insert into call_transcripts(call_log_id,lead_id,transcript_text,summary,"
+                "transcript_link) values(%s,%s,%s,%s,%s) "
+                "on conflict(call_log_id) do update set "
+                "transcript_text=excluded.transcript_text,"
+                "summary=coalesce(excluded.summary,call_transcripts.summary),"
+                "transcript_link=coalesce(excluded.transcript_link,call_transcripts.transcript_link)",
+                (call_log["id"], lead_id, transcript, summary, transcript_link),
+            )
         conn.execute(
             "update test_usage_ledger set status='ended',outcome=coalesce(%s,outcome),"
             "finalized_at=coalesce(finalized_at,now()) "
             "where provider='vapi' and provider_ref=%s",
             (outcome, call_id),
+        )
+        enqueue_sheet_update(
+            conn,
+            lead_id=lead_id,
+            event_type="call_settled",
+            source_key=f"{call_id}:{outcome or 'pending'}",
+            outreach_event_id=int(event_id),
         )
     recorded_outcome = outcome or "pending_tool_outcome"
     trace.log("call_report_recorded", event_id=int(event_id), outcome=recorded_outcome)
@@ -511,7 +531,7 @@ def apply_twilio_message_status(conn, form_data: dict[str, str]) -> int:
     if mapped not in {"queued", "sent", "delivered", "undelivered", "failed"}:
         raise ValueError("invalid Twilio message status")
     error = form_data.get("ErrorCode") or None
-    sms = conn.execute(
+    sms_result = conn.execute(
         "update sms_messages set delivery_status=case "
         "when %s='delivered' then 'delivered' when delivery_status='delivered' then delivery_status "
         "when %s in ('failed','undelivered') then %s "
@@ -520,9 +540,12 @@ def apply_twilio_message_status(conn, form_data: dict[str, str]) -> int:
         "delivered_at=case when %s='delivered' then coalesce(delivered_at,now()) else delivered_at end,"
         "failure_reason=case when delivery_status='delivered' then failure_reason "
         "when %s in ('failed','undelivered') then %s else failure_reason end,"
-        "updated_at=now() where provider_message_id=%s",
+        "updated_at=now() where provider_message_id=%s "
+        "returning lead_id,outreach_event_id,delivery_status,failure_reason",
         (mapped, mapped, mapped, mapped, mapped, mapped, error, sid),
-    ).rowcount
+    )
+    sms = sms_result.rowcount
+    sms_record = sms_result.fetchone()
     notification = conn.execute(
         "update notification_log set status=case "
         "when %s='delivered' then 'delivered' when status='delivered' then status "
@@ -546,6 +569,28 @@ def apply_twilio_message_status(conn, form_data: dict[str, str]) -> int:
         "where provider='twilio' and provider_ref=%s",
         (mapped, mapped, mapped, mapped, mapped, sid),
     ).rowcount
+    actual_status = sms_record["delivery_status"] if sms_record else None
+    if actual_status in {"delivered", "failed", "undelivered"} and sms_record["outreach_event_id"]:
+        event = conn.execute(
+            "update outreach_events oe set status=case when %s='delivered' then 'delivered' "
+            "else 'failed' end,settled_at=coalesce(oe.settled_at,now()),settled_by='webhook',"
+            "failure_reason=case when %s='delivered' then oe.failure_reason else %s end,"
+            "updated_at=now() where oe.id=%s returning oe.id,oe.lead_id",
+            (
+                actual_status,
+                actual_status,
+                sms_record["failure_reason"] or actual_status,
+                sms_record["outreach_event_id"],
+            ),
+        ).fetchone()
+        if event:
+            enqueue_sheet_update(
+                conn,
+                lead_id=str(event["lead_id"]),
+                event_type="sms_settled",
+                source_key=f"{sid}:{actual_status}",
+                outreach_event_id=event["id"],
+            )
     return sms + notification + usage
 
 

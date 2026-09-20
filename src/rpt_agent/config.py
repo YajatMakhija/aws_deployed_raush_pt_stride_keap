@@ -21,6 +21,18 @@ class Settings(BaseSettings):
     api_base_url: str = "http://localhost:8000"
     public_base_url: str = ""
     dashboard_api_token: str = ""
+    dashboard_public_url: str = ""
+    n8n_intake_key_id: str = ""
+    n8n_intake_secret: str = ""
+    n8n_intake_auth_disabled: bool = False
+    n8n_practice_slug: str = "rausch-pt"
+    n8n_sheet_webhook_url: str = ""
+    n8n_sheet_key_id: str = ""
+    n8n_sheet_webhook_secret: str = ""
+    sheet_sync_enabled: bool = False
+    sheet_sync_poll_seconds: int = Field(default=30, ge=1, le=3600)
+    sheet_sync_batch_size: int = Field(default=20, ge=1, le=100)
+    sheet_sync_http_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     vapi_base_url: str = "https://api.vapi.ai"
     vapi_api_key: str = ""
     vapi_assistant_id: str = ""
@@ -68,9 +80,12 @@ class Settings(BaseSettings):
     def runtime_errors(self, service: str) -> list[str]:
         errors: list[str] = []
         deployment_env = self.app_env.lower() in {"preproduction", "preprod", "staging", "production", "prod"}
-        if service in {"api", "worker", "cli"} and not self.supabase_db_url:
+        if service in {"api", "worker", "sheet-worker", "cli"} and not self.supabase_db_url:
             errors.append("SUPABASE_DB_URL is required")
-        elif service in {"api", "worker", "cli"} and "db.example.supabase.co" in self.supabase_db_url:
+        elif (
+            service in {"api", "worker", "sheet-worker", "cli"}
+            and "db.example.supabase.co" in self.supabase_db_url
+        ):
             errors.append("SUPABASE_DB_URL still contains the example hostname")
         if self.provider_mode not in {"mock", "real"}:
             errors.append("PROVIDER_MODE must be mock or real")
@@ -106,6 +121,10 @@ class Settings(BaseSettings):
                 for name, value in required.items() if not value
             )
         if deployment_env:
+            if self.test_mode:
+                errors.append("TEST_MODE must be false outside local development")
+            if self.n8n_intake_auth_disabled:
+                errors.append("N8N_INTAKE_AUTH_DISABLED must be false outside local development")
             database_url = self.supabase_db_url.lower()
             if not any(
                 value in database_url for value in ("sslmode=require", "sslmode=verify-full")
@@ -115,6 +134,11 @@ class Settings(BaseSettings):
                 errors.append("PUBLIC_BASE_URL must use HTTPS")
             if service == "api" and len(self.dashboard_api_token) < 32:
                 errors.append("DASHBOARD_API_TOKEN must contain at least 32 characters")
+            if service == "api":
+                if not self.n8n_intake_key_id:
+                    errors.append("N8N_INTAKE_KEY_ID is required")
+                if len(self.n8n_intake_secret) < 32:
+                    errors.append("N8N_INTAKE_SECRET must contain at least 32 characters")
             if "your-ngrok-domain" in self.public_base_url:
                 errors.append("PUBLIC_BASE_URL still contains the example hostname")
             if self.mode("vapi") == "real" and self.vapi_webhook_secret == "local-vapi-secret":
@@ -135,6 +159,27 @@ class Settings(BaseSettings):
                     errors.append("KEAP_HANDOFF_URL still contains the example hostname")
                 if self.keap_handoff_secret == "local-keap-secret":
                     errors.append("KEAP_HANDOFF_SECRET must be replaced outside local development")
+            if service == "sheet-worker" and self.sheet_sync_enabled:
+                if not self.n8n_sheet_webhook_url.startswith("https://"):
+                    errors.append("N8N_SHEET_WEBHOOK_URL must use HTTPS")
+                elif "example.com" in self.n8n_sheet_webhook_url:
+                    errors.append("N8N_SHEET_WEBHOOK_URL still contains the example hostname")
+                if not self.n8n_sheet_key_id:
+                    errors.append("N8N_SHEET_KEY_ID is required when Sheet sync is enabled")
+                if len(self.n8n_sheet_webhook_secret) < 32:
+                    errors.append("N8N_SHEET_WEBHOOK_SECRET must contain at least 32 characters")
+        if service in {"api", "sheet-worker"} and self.sheet_sync_enabled:
+            if not self.dashboard_public_url.startswith("https://"):
+                errors.append("DASHBOARD_PUBLIC_URL must use HTTPS")
+            elif "example.com" in self.dashboard_public_url:
+                errors.append("DASHBOARD_PUBLIC_URL still contains the example hostname")
+        if service == "sheet-worker" and self.sheet_sync_enabled:
+            if not self.n8n_sheet_webhook_url:
+                errors.append("N8N_SHEET_WEBHOOK_URL is required when Sheet sync is enabled")
+            if not self.n8n_sheet_webhook_secret:
+                errors.append("N8N_SHEET_WEBHOOK_SECRET is required when Sheet sync is enabled")
+            if not self.n8n_practice_slug.strip():
+                errors.append("N8N_PRACTICE_SLUG is required when Sheet sync is enabled")
         if self.retry_max_seconds < self.retry_base_seconds:
             errors.append("RETRY_MAX_SECONDS must be greater than or equal to RETRY_BASE_SECONDS")
         return errors

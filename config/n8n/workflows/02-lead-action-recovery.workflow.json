@@ -1,0 +1,334 @@
+{
+    "name":  "RPT - Recover Processing Sheet Actions",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "rule":  {
+                                                      "interval":  [
+                                                                       {
+                                                                           "field":  "minutes",
+                                                                           "minutesInterval":  5
+                                                                       }
+                                                                   ]
+                                                  }
+                                     },
+                      "id":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2001",
+                      "name":  "Every Five Minutes",
+                      "type":  "n8n-nodes-base.scheduleTrigger",
+                      "typeVersion":  1.2,
+                      "position":  [
+                                       -760,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "read",
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "options":  {
+                                                         "returnAllMatches":  true
+                                                     }
+                                     },
+                      "id":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2002",
+                      "name":  "Read Sheet Rows",
+                      "type":  "n8n-nodes-base.googleSheets",
+                      "typeVersion":  4.6,
+                      "position":  [
+                                       -520,
+                                       0
+                                   ],
+                      "alwaysOutputData":  true,
+                      "credentials":  {
+                                          "googleSheetsOAuth2Api":  {
+                                                                        "id":  "UWfIMNG3yiTc6FCt",
+                                                                        "name":  "Yajat_sheets"
+                                                                    }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const now = Date.now();\nconst actions = {\u0027Start cadence\u0027:\u0027start_cadence\u0027,\u0027Restart cadence\u0027:\u0027restart_cadence\u0027,\u0027Do not contact\u0027:\u0027do_not_contact\u0027};\nfunction normalizePhone(value) {\n  let phone = String(value ?? \u0027\u0027).trim();\n  if (!phone || !/^\\+?[\\d\\s().-]+$/.test(phone)) return null;\n  const digits = phone.replace(/\\D/g, \u0027\u0027);\n  if (digits.startsWith(\u0027001\u0027) \u0026\u0026 digits.length === 13) phone = digits.slice(3);\n  else if (digits.startsWith(\u00271\u0027) \u0026\u0026 digits.length === 11) phone = digits.slice(1);\n  else if (digits.length === 10) phone = digits;\n  else return null;\n  return /^[2-9]\\d{2}[2-9]\\d{6}$/.test(phone) ? \u0027+1\u0027 + phone : null;\n}\nfunction normalizeDob(value) {\n  const text = String(value ?? \u0027\u0027).trim();\n  const dayFirst = text.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/);\n  if (dayFirst) {\n    const day = Number(dayFirst[1]);\n    const month = Number(dayFirst[2]);\n    const year = Number(dayFirst[3]);\n    const dt = new Date(Date.UTC(year, month - 1, day));\n    if (dt.getUTCFullYear() === year \u0026\u0026 dt.getUTCMonth() === month - 1 \u0026\u0026 dt.getUTCDate() === day) {\n      return year.toString().padStart(4, \u00270\u0027) + \u0027-\u0027 + month.toString().padStart(2, \u00270\u0027) + \u0027-\u0027 + day.toString().padStart(2, \u00270\u0027);\n    }\n    return null;\n  }\n  const serial = Number(value);\n  if (!Number.isFinite(serial) || serial \u003c 1 || serial \u003e 100000) return null;\n  return new Date(Date.UTC(1899, 11, 30) + Math.floor(serial) * 86400000).toISOString().slice(0, 10);\n}\nconst output = [];\nfor (const item of $input.all()) {\n  const row = item.json;\n  const actionStatus = String(row[\u0027Action Status\u0027] ?? \u0027\u0027).trim();\n  let retryCount = 0;\n  if (actionStatus.startsWith(\u0027Processing: \u0027)) {\n    retryCount = 1;\n  } else {\n    const match = actionStatus.match(/^Retrying ([12])\\/3: /);\n    if (!match) continue;\n    retryCount = Number(match[1]);\n  }\n  const command = String(row.Action ?? \u0027\u0027).trim();\n  const requestId = String(row[\u0027Action Request ID\u0027] ?? \u0027\u0027).trim();\n  const started = Date.parse(String(row[\u0027Action Started At\u0027] ?? \u0027\u0027));\n  if (!actions[command] || !requestId || !Number.isFinite(started) || started \u003e now || now - started \u003c 120000) continue;\n  const sheetPhone = String(row[\u0027Phone Number\u0027] ?? \u0027\u0027).trim();\n  const phone = normalizePhone(sheetPhone);\n  const leadId = String(row[\u0027Lead ID\u0027] ?? \u0027\u0027).trim() || null;\n  if (!sheetPhone || !phone || (command !== \u0027Start cadence\u0027 \u0026\u0026 !leadId)) continue;\n  const dob = normalizeDob(row[\u0027Date Of Birth\u0027]);\n  output.push({json:{...row,sheetPhone,originalCommand:command,actionRequestId:requestId,actionStartedAt:new Date(started).toISOString(),retryCount,existingLeadId:leadId,requestBody:{action:actions[command],lead_id:command === \u0027Start cadence\u0027 ? null : leadId,lead:{full_name:String(row.Name ?? \u0027\u0027).trim() || null,phone,email:String(row.Email ?? \u0027\u0027).trim().toLowerCase() || null,date_of_birth:dob,location:String(row.Location ?? \u0027\u0027).trim() || null,title:String(row.Title ?? \u0027\u0027).trim() || null}}}});\n}\nreturn output;"
+                                     },
+                      "id":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2003",
+                      "name":  "Build Recovery Requests",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -280,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "mode":  "runOnceForEachItem",
+                                         "jsCode":  "const timestamp = Math.floor(Date.now()/1000).toString();\nconst rawBody = JSON.stringify($json.requestBody);\nconst secret = $env.RPT_N8N_INTAKE_SECRET;\nif (!secret) throw new Error(\u0027Missing RPT_N8N_INTAKE_SECRET\u0027);\nif (!globalThis.crypto?.subtle) throw new Error(\u0027Web Crypto API is unavailable in this n8n instance\u0027);\nconst encoder = new TextEncoder();\nconst key = await globalThis.crypto.subtle.importKey(\u0027raw\u0027,encoder.encode(secret),{name:\u0027HMAC\u0027,hash:\u0027SHA-256\u0027},false,[\u0027sign\u0027]);\nconst signed = await globalThis.crypto.subtle.sign(\u0027HMAC\u0027,key,encoder.encode(`${timestamp}.${rawBody}`));\nconst signatureHex = Array.from(new Uint8Array(signed)).map(byte=\u003ebyte.toString(16).padStart(2,\u00270\u0027)).join(\u0027\u0027);\nreturn {json:{...$json,rawBody,timestamp,signature:`sha256=${signatureHex}`}};"
+                                     },
+                      "id":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2004",
+                      "name":  "Sign Recovery Requests",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -40,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "={{ $env.RPT_BACKEND_BASE_URL.replace(/\\/$/, \u0027\u0027) + \u0027/api/v1/integrations/n8n/lead-actions\u0027 }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Content-Type",
+                                                                                         "value":  "application/json"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-RPT-Key-Id",
+                                                                                         "value":  "={{ $env.RPT_N8N_INTAKE_KEY_ID }}"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-RPT-Timestamp",
+                                                                                         "value":  "={{ $json.timestamp }}"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-RPT-Signature",
+                                                                                         "value":  "={{ $json.signature }}"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-Request-ID",
+                                                                                         "value":  "={{ $json.actionRequestId }}"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "contentType":  "raw",
+                                         "rawContentType":  "application/json",
+                                         "body":  "={{ $json.rawBody }}",
+                                         "options":  {
+                                                         "response":  {
+                                                                          "response":  {
+                                                                                           "fullResponse":  true,
+                                                                                           "neverError":  true
+                                                                                       }
+                                                                      },
+                                                         "timeout":  15000
+                                                     }
+                                     },
+                      "id":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2005",
+                      "name":  "Retry Lead Action",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.2,
+                      "position":  [
+                                       200,
+                                       0
+                                   ],
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000,
+                      "onError":  "continueRegularOutput"
+                  },
+                  {
+                      "parameters":  {
+                                         "mode":  "runOnceForEachItem",
+                                         "jsCode":  "const source = $(\u0027Sign Recovery Requests\u0027).item.json;\nconst status = Number($json.statusCode || 0);\nlet body = $json.body || {};\nif (typeof body === \u0027string\u0027) { try { body = JSON.parse(body); } catch { body = {}; } }\nconst success = status === 200 || status === 201;\nconst temporary = status === 0 || [408,425,429].includes(status) || status \u003e= 500;\nconst labels = {cadence_started:\u0027Cadence started\u0027,already_started:\u0027Already in Cadence\u0027,cadence_restarted:\u0027Cadence restarted\u0027,do_not_contact_applied:\u0027Do not contact applied\u0027};\nconst detail = typeof body.detail === \u0027string\u0027 ? body.detail : (typeof body.code === \u0027string\u0027 ? body.code : ($json.error?.message || \u0027request rejected\u0027));\nconst attemptsUsed = Number(source.retryCount || 1) + 1;\nlet actionResult = \u0027\u0027;\nlet finalStartedAt = \u0027\u0027;\nif (success) {\n  actionResult = labels[body.result] || \u0027Completed\u0027;\n} else if (temporary \u0026\u0026 attemptsUsed \u003c 3) {\n  actionResult = \u0027Retrying \u0027 + attemptsUsed + \u0027/3: \u0027 + source.originalCommand;\n  finalStartedAt = new Date().toISOString();\n} else if (temporary) {\n  actionResult = \u0027Error: backend unavailable after 3 attempts\u0027;\n} else {\n  actionResult = \u0027Error: \u0027 + String(detail).slice(0,180);\n}\nreturn {json:{...source,httpStatus:status,leadId:body.lead_id || source.existingLeadId || \u0027\u0027,actionResult,finalStartedAt}};"
+                                     },
+                      "id":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2006",
+                      "name":  "Prepare Recovery Result",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       440,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "update",
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "columns":  {
+                                                         "mappingMode":  "defineBelow",
+                                                         "value":  {
+                                                                       "Phone Number":  "={{ $json.sheetPhone }}",
+                                                                       "Lead ID":  "={{ $json.leadId }}",
+                                                                       "Action Status":  "={{ $json.actionResult }}",
+                                                                       "Action Request ID":  "={{ $json.actionRequestId }}",
+                                                                         "Action Started At":  "={{ $json.finalStartedAt }}",
+                                                                         "Transcript Link":  "={{ $json.leadId ? 'https://rpt-frontend-pi.vercel.app/leads/' + $json.leadId + '/conversations/calls' : '' }}"
+                                                                   },
+                                                         "matchingColumns":  [
+                                                                                 "Action Request ID"
+                                                                             ],
+                                                         "schema":  [
+                                                                        {
+                                                                            "id":  "Count",
+                                                                            "displayName":  "Count",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsReadOnly",
+                                                                            "displayName":  "IsReadOnly",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Keys",
+                                                                            "displayName":  "Keys",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Values",
+                                                                            "displayName":  "Values",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsFixedSize",
+                                                                            "displayName":  "IsFixedSize",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "SyncRoot",
+                                                                            "displayName":  "SyncRoot",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsSynchronized",
+                                                                            "displayName":  "IsSynchronized",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        }
+                                                                    ]
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2007",
+                      "name":  "Write Recovery Result",
+                      "type":  "n8n-nodes-base.googleSheets",
+                      "typeVersion":  4.6,
+                      "position":  [
+                                       680,
+                                       0
+                                   ],
+                      "credentials":  {
+                                          "googleSheetsOAuth2Api":  {
+                                                                        "id":  "UWfIMNG3yiTc6FCt",
+                                                                        "name":  "Yajat_sheets"
+                                                                    }
+                                      }
+                  }
+              ],
+    "connections":  {
+                        "Every Five Minutes":  {
+                                                   "main":  [
+                                                                [
+                                                                    {
+                                                                        "node":  "Read Sheet Rows",
+                                                                        "type":  "main",
+                                                                        "index":  0
+                                                                    }
+                                                                ]
+                                                            ]
+                                               },
+                        "Read Sheet Rows":  {
+                                                "main":  [
+                                                             [
+                                                                 {
+                                                                     "node":  "Build Recovery Requests",
+                                                                     "type":  "main",
+                                                                     "index":  0
+                                                                 }
+                                                             ]
+                                                         ]
+                                            },
+                        "Build Recovery Requests":  {
+                                                        "main":  [
+                                                                     [
+                                                                         {
+                                                                             "node":  "Sign Recovery Requests",
+                                                                             "type":  "main",
+                                                                             "index":  0
+                                                                         }
+                                                                     ]
+                                                                 ]
+                                                    },
+                        "Sign Recovery Requests":  {
+                                                       "main":  [
+                                                                    [
+                                                                        {
+                                                                            "node":  "Retry Lead Action",
+                                                                            "type":  "main",
+                                                                            "index":  0
+                                                                        }
+                                                                    ]
+                                                                ]
+                                                   },
+                        "Retry Lead Action":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "Prepare Recovery Result",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "Prepare Recovery Result":  {
+                                                        "main":  [
+                                                                     [
+                                                                         {
+                                                                             "node":  "Write Recovery Result",
+                                                                             "type":  "main",
+                                                                             "index":  0
+                                                                         }
+                                                                     ]
+                                                                 ]
+                                                    }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "saveManualExecutions":  true,
+                     "callerPolicy":  "workflowsFromSameOwner"
+                 },
+    "versionId":  "202b4f20-6eaf-4ee7-b5e5-9d58879f2099",
+    "meta":  {
+                 "templateCredsSetupCompleted":  true
+             },
+    "tags":  [
+
+             ]
+}

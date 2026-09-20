@@ -4,11 +4,14 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+
+import psycopg
 
 from .config import get_settings
 from .db import transaction
@@ -20,7 +23,31 @@ from .services.delivery import (
     reprocess_failed_twilio_events,
     reprocess_failed_vapi_events,
 )
+from .services.sheet_sync import enqueue_sheet_update
 from .usage_report import record_test_usage
+
+
+# Session-level advisory lock: only one cadence worker may dispatch outreach.
+CADENCE_WORKER_LOCK_ID = 7_272_054_119
+
+
+@contextmanager
+def cadence_worker_lock(database_url: str, connect_timeout: float):
+    """Hold a database-wide singleton lock for this worker process."""
+    with psycopg.connect(
+        database_url,
+        autocommit=True,
+        connect_timeout=max(1, int(connect_timeout)),
+    ) as conn:
+        acquired = conn.execute(
+            "select pg_try_advisory_lock(%s)", (CADENCE_WORKER_LOCK_ID,)
+        ).fetchone()[0]
+        if not acquired:
+            raise RuntimeError("another cadence worker already owns the worker lock")
+        try:
+            yield conn
+        finally:
+            conn.execute("select pg_advisory_unlock(%s)", (CADENCE_WORKER_LOCK_ID,))
 
 
 @dataclass(frozen=True)
@@ -249,6 +276,9 @@ from due where oe.id=due.id
 def claim_jobs(trace: WorkflowTrace, limit: int = 20) -> list[Job]:
     trace.log("database_operation_started", operation="claim_due_events")
     with transaction() as conn:
+        # Migration 025 permits only workers that identify with this claim protocol.
+        # Stale deployments are unable to move planned outreach to in_flight.
+        conn.execute("select set_config('rpt.worker_claim_protocol','v1',true)")
         rows = conn.execute(
             CLAIM_SQL, {"limit": limit, "test_mode": get_settings().test_mode}
         ).fetchall()
@@ -333,6 +363,7 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
     counts = {
         "stuck_dispatches": 0,
         "orphaned_calls": 0,
+        "stale_sms": 0,
         "stuck_notifications": 0,
         "stuck_handoffs": 0,
         "stuck_bookings": 0,
@@ -342,17 +373,31 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
         stuck = conn.execute(
             "update outreach_events set status='unknown',settled_at=now(),settled_by='sweeper',"
             "failure_reason='worker stopped before dispatch result was recorded' "
-            "where status='in_flight' and updated_at<now()-interval '15 minutes' returning lead_id"
+            "where status='in_flight' and updated_at<now()-interval '15 minutes' "
+            "returning id,lead_id"
         ).fetchall()
         orphaned = conn.execute(
             "update outreach_events set status='delivered',settled_at=now(),settled_by='sweeper',outcome='manual',"
-            "failure_reason='call outcome was not reported' where status='attempted' "
-            "and executed_at<now()-interval '2 hours' returning lead_id,vapi_call_id"
+            "failure_reason='call outcome was not reported' where channel='call' and status='attempted' "
+            "and executed_at<now()-interval '2 hours' returning id,lead_id,vapi_call_id"
+        ).fetchall()
+        stale_sms = conn.execute(
+            "update outreach_events set status='unknown',settled_at=now(),settled_by='sweeper',"
+            "failure_reason='SMS delivery callback was not reported' "
+            "where channel='sms' and status='attempted' "
+            "and executed_at<now()-interval '2 hours' returning id,lead_id"
         ).fetchall()
         for row in stuck:
             conn.execute(
                 "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
                 ("ambiguous provider dispatch; do not retry", row["lead_id"]),
+            )
+            enqueue_sheet_update(
+                conn,
+                lead_id=str(row["lead_id"]),
+                event_type="outreach_unknown",
+                source_key=f"event:{row['id']}:stuck",
+                outreach_event_id=row["id"],
             )
         for row in orphaned:
             # A lead whose cadence already ended has nothing left to act on, so
@@ -369,6 +414,26 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
                     "where provider='vapi' and provider_ref=%s",
                     (row["vapi_call_id"],),
                 )
+            enqueue_sheet_update(
+                conn,
+                lead_id=str(row["lead_id"]),
+                event_type="call_settled",
+                source_key=f"event:{row['id']}:manual",
+                outreach_event_id=row["id"],
+            )
+        for row in stale_sms:
+            conn.execute(
+                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
+                "where id=%s and cadence_state not in ('completed','terminated')",
+                ("SMS delivery status not reported", row["lead_id"]),
+            )
+            enqueue_sheet_update(
+                conn,
+                lead_id=str(row["lead_id"]),
+                event_type="outreach_unknown",
+                source_key=f"event:{row['id']}:sms-callback-missing",
+                outreach_event_id=row["id"],
+            )
         stuck_notifications = conn.execute(
             "update notification_log set status='unknown',error=%s,updated_at=now() "
             "where status='sending' and updated_at<now()-interval '15 minutes' returning lead_id",
@@ -382,7 +447,8 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
                 )
         stuck_handoffs = conn.execute(
             "update integration_outbox set status='pending',next_attempt_at=now(),last_error=%s,updated_at=now() "
-            "where status='sending' and updated_at<now()-interval '15 minutes' returning id",
+            "where destination='keap' and status='sending' "
+            "and updated_at<now()-interval '15 minutes' returning id",
             ("worker stopped during delivery; retry with the same event_id",),
         ).fetchall()
         stuck_bookings = conn.execute(
@@ -416,9 +482,17 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
             "and not exists(select 1 from outreach_events oe where oe.lead_id=l.id "
             "and oe.status in ('planned','in_flight','attempted')) returning id"
         ).fetchall()
+        for row in exhausted:
+            enqueue_sheet_update(
+                conn,
+                lead_id=str(row["id"]),
+                event_type="cadence_finished",
+                source_key=f"lead:{row['id']}:closed_no_response",
+            )
         counts.update(
             stuck_dispatches=len(stuck),
             orphaned_calls=len(orphaned),
+            stale_sms=len(stale_sms),
             stuck_notifications=len(stuck_notifications),
             stuck_handoffs=len(stuck_handoffs),
             stuck_bookings=len(stuck_bookings),
@@ -472,22 +546,47 @@ def run_tick() -> dict[str, int]:
                 if providers.settings.mode("vapi") == "real":
                     record_test_usage(conn, "vapi", "call", job.lead_id, value)
             elif state == "accepted":
+                mock_delivery = providers.settings.mode("twilio") == "mock"
                 conn.execute(
-                    "update outreach_events set status='delivered',executed_at=now(),settled_at=now(),"
-                    "settled_by='worker',provider='twilio',provider_ref=%s where id=%s and status='in_flight'",
-                    (value, job.event_id),
+                    "update outreach_events set status=%s,executed_at=now(),"
+                    "settled_at=case when %s then now() else null end,"
+                    "settled_by=case when %s then 'worker' else null end,"
+                    "provider='twilio',provider_ref=%s where id=%s and status='in_flight'",
+                    (
+                        "delivered" if mock_delivery else "attempted",
+                        mock_delivery,
+                        mock_delivery,
+                        value,
+                        job.event_id,
+                    ),
                 )
                 conn.execute(
                     "insert into sms_messages(lead_id,outreach_event_id,direction,body,occurred_at,delivery_status,"
-                    "provider_message_id) values(%s,%s,'outbound',%s,now(),'queued',%s) "
+                    "provider_message_id,delivered_at) values(%s,%s,'outbound',%s,now(),%s,%s,"
+                    "case when %s then now() else null end) "
                     "on conflict(provider_message_id) do nothing",
-                    (job.lead_id, job.event_id, render_sms_template(job), value),
+                    (
+                        job.lead_id,
+                        job.event_id,
+                        render_sms_template(job),
+                        "delivered" if mock_delivery else "queued",
+                        value,
+                        mock_delivery,
+                    ),
                 )
                 conn.execute(
                     "update leads set last_contacted_at=now() where id=%s", (job.lead_id,)
                 )
                 if providers.settings.mode("twilio") == "real":
                     record_test_usage(conn, "twilio", "cadence_sms", job.lead_id, value)
+                else:
+                    enqueue_sheet_update(
+                        conn,
+                        lead_id=job.lead_id,
+                        event_type="sms_settled",
+                        source_key=f"{value}:delivered",
+                        outreach_event_id=job.event_id,
+                    )
             elif state == "retry" and job.attempt_no < settings.retry_max_attempts:
                 delay = retry_delay_seconds(
                     job.attempt_no,
@@ -525,6 +624,8 @@ def run_tick() -> dict[str, int]:
                         job.lead_id,
                     ),
                 )
+                # Migration 025 creates the Sheet outbox row from the terminal
+                # status transition, including transitions made by stale workers.
                 counts["failed" if state in {"failed", "retry"} else "unknown"] += 1
             if state == "accepted":
                 counts["accepted"] += 1
@@ -540,14 +641,20 @@ def main() -> None:
     if errors:
         raise RuntimeError("; ".join(errors))
     interval = settings.worker_poll_seconds
-    logging.getLogger(__name__).info("worker_started", extra={"event": "worker_started"})
-    while True:
-        started = time.monotonic()
-        try:
-            run_tick()
-        except Exception:
-            logging.getLogger(__name__).exception("worker_tick_failed", extra={"event": "worker_tick_failed"})
-        time.sleep(max(0, interval - (time.monotonic() - started)))
+    with cadence_worker_lock(settings.supabase_db_url, settings.db_pool_timeout_seconds) as lock_conn:
+        logging.getLogger(__name__).info("worker_started", extra={"event": "worker_started"})
+        while True:
+            started = time.monotonic()
+            # A lost lock connection releases the lock. Exit instead of
+            # continuing to dispatch without ownership.
+            lock_conn.execute("select 1")
+            try:
+                run_tick()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "worker_tick_failed", extra={"event": "worker_tick_failed"}
+                )
+            time.sleep(max(0, interval - (time.monotonic() - started)))
 
 
 if __name__ == "__main__":
