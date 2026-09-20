@@ -1,0 +1,607 @@
+{
+    "name":  "RPT - Google Sheet Lead Action Intake",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "pollTimes":  {
+                                                           "item":  [
+                                                                        {
+                                                                            "mode":  "everyMinute"
+                                                                        }
+                                                                    ]
+                                                       },
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "event":  "anyUpdate",
+                                         "includeInOutput":  "new",
+                                         "options":  {
+                                                         "columnsToWatch":  [
+                                                                                "Action"
+                                                                            ]
+                                                     }
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1001",
+                      "name":  "Google Sheets Trigger",
+                      "type":  "n8n-nodes-base.googleSheetsTrigger",
+                      "typeVersion":  1,
+                      "position":  [
+                                       -900,
+                                       0
+                                   ],
+                      "credentials":  {
+                                          "googleSheetsTriggerOAuth2Api":  {
+                                                                               "id":  "GnsvTqUhaPfNteUs",
+                                                                               "name":  "Yajat-sheets"
+                                                                           }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  2
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "action-status-empty",
+                                                                                   "leftValue":  "={{ String($json['Action Status'] ?? '').trim() === '' }}",
+                                                                                   "rightValue":  true,
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1010",
+                      "name":  "Action Status Empty?",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       -780,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const actions = {'Start cadence':'start_cadence','Restart cadence':'restart_cadence','Do not contact':'do_not_contact'};\n\nfunction normalizePhone(value) {\n  if (value === null || value === undefined) return null;\n  let phone = String(value).trim();\n  if (!phone || !/^\\+?[\\d\\s().-]+$/.test(phone)) return null;\n  const digits = phone.replace(/\\D/g, '');\n  if (digits.startsWith('001') && digits.length === 13) phone = digits.slice(3);\n  else if (digits.startsWith('1') && digits.length === 11) phone = digits.slice(1);\n  else if (digits.length === 10) phone = digits;\n  else return null;\n  return /^[2-9]\\d{2}[2-9]\\d{6}$/.test(phone) ? '+1' + phone : null;\n}\n\nfunction normalizeDob(value) {\n  const text = String(value ?? '').trim();\n  const dayFirst = text.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/);\n  if (dayFirst) {\n    const day = Number(dayFirst[1]);\n    const month = Number(dayFirst[2]);\n    const year = Number(dayFirst[3]);\n    const dt = new Date(Date.UTC(year, month - 1, day));\n    if (dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day) {\n      return year.toString().padStart(4, '0') + '-' + month.toString().padStart(2, '0') + '-' + day.toString().padStart(2, '0');\n    }\n    return null;\n  }\n  const serial = Number(value);\n  if (!Number.isFinite(serial) || serial < 1 || serial > 100000) return null;\n  return new Date(Date.UTC(1899, 11, 30) + Math.floor(serial) * 86400000).toISOString().slice(0, 10);\n}\n\nconst output = [];\nfor (const [index, item] of $input.all().entries()) {\n  const row = item.json;\n  const command = String(row.Action || '').trim();\n  if (!actions[command]) continue;\n\n  const errors = [];\n  const sheetRowNumber = Number(row.row_number ?? row.rowNumber);\n  if (!Number.isInteger(sheetRowNumber) || sheetRowNumber < 2) errors.push('Sheet row number is unavailable');\n  const sheetPhone = String(row['Phone Number'] ?? '').trim();\n\n  const phone = normalizePhone(sheetPhone);\n  const dob = normalizeDob(row['Date Of Birth']);\n  if (!phone) errors.push('invalid phone number');\n\n  const leadId = String(row['Lead ID'] || '').trim() || null;\n  if (command !== 'Start cadence' && !leadId) errors.push('Lead ID is required');\n\n  if (command === 'Start cadence') {\n    for (const key of ['Name','Date Of Birth','Location','Title']) {\n      if (!String(row[key] ?? '').trim()) errors.push(key + ' is required');\n    }\n    if (!dob) errors.push('Date Of Birth must be DD/MM/YYYY');\n  }\n\n  const email = String(row.Email || '').trim().toLowerCase();\n  if (email && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(email)) errors.push('invalid email');\n  if (!globalThis.crypto?.randomUUID) throw new Error('Web Crypto UUID generation is unavailable');\n\n  const requestId = globalThis.crypto.randomUUID();\n  output.push({\n    json: {\n      ...row,\n      sheetPhone,\n      sheetRowNumber,\n      valid: errors.length === 0,\n      validationError: errors.join('; '),\n      originalCommand: command,\n      actionRequestId: requestId,\n      actionStartedAt: new Date().toISOString(),\n      existingLeadId: leadId,\n      requestBody: {\n        action: actions[command],\n        lead_id: command === 'Start cadence' ? null : leadId,\n        lead: {\n          full_name: row.Name ? String(row.Name).trim() : null,\n          phone,\n          email: email || null,\n          date_of_birth: dob,\n          location: row.Location ? String(row.Location).trim() : null,\n          title: row.Title ? String(row.Title).trim() : null\n        }\n      }\n    },\n    pairedItem: {item: index}\n  });\n}\nreturn output;"
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1002",
+                      "name":  "Validate and Build Intake",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -660,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  2
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "valid-intake",
+                                                                                   "leftValue":  "={{ $json.valid }}",
+                                                                                   "rightValue":  true,
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1003",
+                      "name":  "Input Valid?",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       -420,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "update",
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "columns":  {
+                                                         "mappingMode":  "defineBelow",
+                                                         "value":  {
+                                                                       "row_number":  "={{ $json.sheetRowNumber }}",
+                                                                       "Action Status":  "={{ \u0027Error: \u0027 + $json.validationError }}",
+                                                                       "Action Started At":  ""
+                                                                   },
+                                                         "matchingColumns":  [
+                                                                                 "row_number"
+                                                                             ],
+                                                         "schema":  [
+                                                                        {
+                                                                            "id":  "Count",
+                                                                            "displayName":  "Count",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsReadOnly",
+                                                                            "displayName":  "IsReadOnly",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Keys",
+                                                                            "displayName":  "Keys",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Values",
+                                                                            "displayName":  "Values",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsFixedSize",
+                                                                            "displayName":  "IsFixedSize",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "SyncRoot",
+                                                                            "displayName":  "SyncRoot",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsSynchronized",
+                                                                            "displayName":  "IsSynchronized",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        }
+                                                                    ]
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1004",
+                      "name":  "Write Validation Error",
+                      "type":  "n8n-nodes-base.googleSheets",
+                      "typeVersion":  4.6,
+                      "position":  [
+                                       -160,
+                                       180
+                                   ],
+                      "credentials":  {
+                                          "googleSheetsOAuth2Api":  {
+                                                                        "id":  "UWfIMNG3yiTc6FCt",
+                                                                        "name":  "Yajat_sheets"
+                                                                    }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "update",
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "columns":  {
+                                                         "mappingMode":  "defineBelow",
+                                                         "value":  {
+                                                                       "row_number":  "={{ $json.sheetRowNumber }}",
+                                                                       "Action Status":  "={{ \u0027Processing: \u0027 + $json.originalCommand }}",
+                                                                       "Action Request ID":  "={{ $json.actionRequestId }}",
+                                                                       "Action Started At":  "={{ $json.actionStartedAt }}"
+                                                                   },
+                                                         "matchingColumns":  [
+                                                                                 "row_number"
+                                                                             ],
+                                                         "schema":  [
+                                                                        {
+                                                                            "id":  "Count",
+                                                                            "displayName":  "Count",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsReadOnly",
+                                                                            "displayName":  "IsReadOnly",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Keys",
+                                                                            "displayName":  "Keys",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Values",
+                                                                            "displayName":  "Values",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsFixedSize",
+                                                                            "displayName":  "IsFixedSize",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "SyncRoot",
+                                                                            "displayName":  "SyncRoot",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsSynchronized",
+                                                                            "displayName":  "IsSynchronized",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        }
+                                                                    ]
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1005",
+                      "name":  "Mark Row Processing",
+                      "type":  "n8n-nodes-base.googleSheets",
+                      "typeVersion":  4.6,
+                      "position":  [
+                                       -160,
+                                       -80
+                                   ],
+                      "credentials":  {
+                                          "googleSheetsOAuth2Api":  {
+                                                                        "id":  "UWfIMNG3yiTc6FCt",
+                                                                        "name":  "Yajat_sheets"
+                                                                    }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "mode":  "runOnceForEachItem",
+                                         "jsCode":  "const actionRequestId = String($json['Action Request ID'] ?? $json.actionRequestId ?? '').trim();\nconst matches = $('Validate and Build Intake').all().filter(\n  item => String(item.json.actionRequestId ?? '').trim() === actionRequestId\n);\nif (!actionRequestId || matches.length !== 1) {\n  throw new Error('Could not uniquely match the processing row by Action Request ID');\n}\nconst source = matches[0].json;\nconst timestamp = Math.floor(Date.now()/1000).toString();\nconst rawBody = JSON.stringify(source.requestBody);\nconst secret = $env.RPT_N8N_INTAKE_SECRET;\nif (!secret) throw new Error('Missing RPT_N8N_INTAKE_SECRET');\nif (!globalThis.crypto?.subtle) throw new Error('Web Crypto API is unavailable in this n8n instance');\nconst encoder = new TextEncoder();\nconst key = await globalThis.crypto.subtle.importKey('raw',encoder.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);\nconst signed = await globalThis.crypto.subtle.sign('HMAC',key,encoder.encode(timestamp + '.' + rawBody));\nconst signatureHex = Array.from(new Uint8Array(signed)).map(byte=>byte.toString(16).padStart(2,'0')).join('');\nreturn {json:{...source,rawBody,timestamp,signature:'sha256=' + signatureHex}};"
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1006",
+                      "name":  "Sign Intake Request",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       80,
+                                       -80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "={{ $env.RPT_BACKEND_BASE_URL.replace(/\\/$/, \u0027\u0027) + \u0027/api/v1/integrations/n8n/lead-actions\u0027 }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Content-Type",
+                                                                                         "value":  "application/json"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-RPT-Key-Id",
+                                                                                         "value":  "={{ $env.RPT_N8N_INTAKE_KEY_ID }}"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-RPT-Timestamp",
+                                                                                         "value":  "={{ $json.timestamp }}"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-RPT-Signature",
+                                                                                         "value":  "={{ $json.signature }}"
+                                                                                     },
+                                                                                     {
+                                                                                         "name":  "X-Request-ID",
+                                                                                         "value":  "={{ $json.actionRequestId }}"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "contentType":  "raw",
+                                         "rawContentType":  "application/json",
+                                         "body":  "={{ $json.rawBody }}",
+                                         "options":  {
+                                                         "response":  {
+                                                                          "response":  {
+                                                                                           "fullResponse":  true,
+                                                                                           "neverError":  true
+                                                                                       }
+                                                                      },
+                                                         "timeout":  15000
+                                                     }
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1007",
+                      "name":  "POST Lead Action to AWS",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.2,
+                      "position":  [
+                                       320,
+                                       -80
+                                   ],
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000,
+                      "onError":  "continueRegularOutput"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const signedItems = $(\u0027Sign Intake Request\u0027).all();\nconst signedByRequest = new Map(\n  signedItems.map(item =\u003e [String(item.json.actionRequestId ?? \u0027\u0027), item.json])\n);\nconst output = [];\n\nfor (const [index, item] of $input.all().entries()) {\n  const response = item.json;\n  const status = Number(response.statusCode || 0);\n  let body = response.body || {};\n  if (typeof body === \u0027string\u0027) {\n    try { body = JSON.parse(body); } catch { body = {}; }\n  }\n\n  const responseRequestId = String(body.request_id ?? \u0027\u0027);\n  const source = signedByRequest.get(responseRequestId) || signedItems[index]?.json;\n  if (!source) throw new Error(\u0027Could not match the AWS response to its source Sheet row\u0027);\n\n  const success = status === 200 || status === 201;\n  const temporary = status === 0 || [408,425,429].includes(status) || status \u003e= 500;\n  const labels = {cadence_started:\u0027Cadence started\u0027,already_started:\u0027Already in Cadence\u0027,cadence_restarted:\u0027Cadence restarted\u0027,do_not_contact_applied:\u0027Do not contact applied\u0027};\n  const detail = typeof body.detail === \u0027string\u0027 ? body.detail : (typeof body.code === \u0027string\u0027 ? body.code : (response.error?.message || \u0027request rejected\u0027));\n\n  let actionResult = \u0027\u0027;\n  let finalStartedAt = \u0027\u0027;\n  if (success) {\n    actionResult = labels[body.result] || \u0027Completed\u0027;\n  } else if (temporary) {\n    actionResult = \u0027Retrying 1/3: \u0027 + source.originalCommand;\n    finalStartedAt = new Date().toISOString();\n  } else {\n    actionResult = \u0027Error: \u0027 + String(detail).slice(0,180);\n  }\n\n  output.push({\n    json: {\n      ...source,\n      httpStatus: status,\n      leadId: body.lead_id || source.existingLeadId || \u0027\u0027,\n      actionResult,\n      finalStartedAt\n    },\n    pairedItem: {item: index}\n  });\n}\nreturn output;"
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1008",
+                      "name":  "Prepare Intake Sheet Result",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       560,
+                                       -80
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "operation":  "update",
+                                         "documentId":  {
+                                                            "__rl":  true,
+                                                            "value":  "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20",
+                                                            "mode":  "list",
+                                                            "cachedResultName":  "Copy of Lead_Sheet",
+                                                            "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit?usp=drivesdk"
+                                                        },
+                                         "sheetName":  {
+                                                           "__rl":  true,
+                                                           "value":  1286805801,
+                                                           "mode":  "list",
+                                                           "cachedResultName":  "Leads",
+                                                           "cachedResultUrl":  "https://docs.google.com/spreadsheets/d/1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20/edit#gid=1286805801"
+                                                       },
+                                         "columns":  {
+                                                         "mappingMode":  "defineBelow",
+                                                         "value":  {
+                                                                       "Phone Number":  "={{ $json.sheetPhone }}",
+                                                                       "Lead ID":  "={{ $json.leadId }}",
+                                                                       "Action Status":  "={{ $json.actionResult }}",
+                                                                       "Action Request ID":  "={{ $json.actionRequestId }}",
+                                                                       "Action Started At":  "={{ $json.finalStartedAt }}",
+                                                                       "Transcript Link":  "={{ $json.leadId ? 'https://rpt-frontend-pi.vercel.app/leads/' + $json.leadId + '/conversations/calls' : '' }}"
+                                                                   },
+                                                         "matchingColumns":  [
+                                                                                 "Action Request ID"
+                                                                             ],
+                                                         "schema":  [
+                                                                        {
+                                                                            "id":  "Count",
+                                                                            "displayName":  "Count",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsReadOnly",
+                                                                            "displayName":  "IsReadOnly",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Keys",
+                                                                            "displayName":  "Keys",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "Values",
+                                                                            "displayName":  "Values",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsFixedSize",
+                                                                            "displayName":  "IsFixedSize",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "SyncRoot",
+                                                                            "displayName":  "SyncRoot",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        },
+                                                                        {
+                                                                            "id":  "IsSynchronized",
+                                                                            "displayName":  "IsSynchronized",
+                                                                            "type":  "string",
+                                                                            "canBeUsedToMatch":  true
+                                                                        }
+                                                                    ]
+                                                     },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1009",
+                      "name":  "Write Intake Result",
+                      "type":  "n8n-nodes-base.googleSheets",
+                      "typeVersion":  4.6,
+                      "position":  [
+                                       800,
+                                       -80
+                                   ],
+                      "credentials":  {
+                                          "googleSheetsOAuth2Api":  {
+                                                                        "id":  "UWfIMNG3yiTc6FCt",
+                                                                        "name":  "Yajat_sheets"
+                                                                    }
+                                      }
+                  }
+              ],
+    "connections":  {
+                        "Google Sheets Trigger":  {
+                                                      "main":  [
+                                                                   [
+                                                                       {
+                                                                           "node":  "Action Status Empty?",
+                                                                           "type":  "main",
+                                                                           "index":  0
+                                                                       }
+                                                                   ]
+                                                               ]
+                                                  },
+                        "Action Status Empty?":  {
+                                                     "main":  [
+                                                                  [
+                                                                      {
+                                                                          "node":  "Validate and Build Intake",
+                                                                          "type":  "main",
+                                                                          "index":  0
+                                                                      }
+                                                                  ],
+                                                                  [
+
+                                                                  ]
+                                                              ]
+                                                 },
+                        "Validate and Build Intake":  {
+                                                          "main":  [
+                                                                       [
+                                                                           {
+                                                                               "node":  "Input Valid?",
+                                                                               "type":  "main",
+                                                                               "index":  0
+                                                                           }
+                                                                       ]
+                                                                   ]
+                                                      },
+                        "Input Valid?":  {
+                                             "main":  [
+                                                          [
+                                                              {
+                                                                  "node":  "Mark Row Processing",
+                                                                  "type":  "main",
+                                                                  "index":  0
+                                                              }
+                                                          ],
+                                                          [
+                                                              {
+                                                                  "node":  "Write Validation Error",
+                                                                  "type":  "main",
+                                                                  "index":  0
+                                                              }
+                                                          ]
+                                                      ]
+                                         },
+                        "Mark Row Processing":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Sign Intake Request",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                },
+                        "Sign Intake Request":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "POST Lead Action to AWS",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                },
+                        "POST Lead Action to AWS":  {
+                                                        "main":  [
+                                                                     [
+                                                                         {
+                                                                             "node":  "Prepare Intake Sheet Result",
+                                                                             "type":  "main",
+                                                                             "index":  0
+                                                                         }
+                                                                     ]
+                                                                 ]
+                                                    },
+                        "Prepare Intake Sheet Result":  {
+                                                            "main":  [
+                                                                         [
+                                                                             {
+                                                                                 "node":  "Write Intake Result",
+                                                                                 "type":  "main",
+                                                                                 "index":  0
+                                                                             }
+                                                                         ]
+                                                                     ]
+                                                        }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "saveManualExecutions":  true,
+                     "callerPolicy":  "workflowsFromSameOwner"
+                 },
+    "versionId":  "101a3e10-5d9e-4dd6-a4d4-8c47768f1099",
+    "meta":  {
+                 "templateCredsSetupCompleted":  true
+             },
+    "tags":  [
+
+             ]
+}

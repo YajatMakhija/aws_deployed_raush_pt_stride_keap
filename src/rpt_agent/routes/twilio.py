@@ -12,6 +12,7 @@ from ..observability import WorkflowTrace, trace_id_var
 from ..security import require_twilio_auth
 from ..services.delivery import apply_twilio_message_status
 from ..services.lead_status import explicit_opt_out
+from ..services.sheet_sync import enqueue_sheet_update
 
 router = APIRouter(prefix="/api/v1/twilio", tags=["twilio"])
 
@@ -49,6 +50,12 @@ async def twilio_inbound_sms(request: Request):
             conn.execute(
                 "update leads set status='callback_scheduled',callback_requested_at=now(),status_changed_at=now() "
                 "where id=%s", (lead["id"],),
+            )
+            enqueue_sheet_update(
+                conn,
+                lead_id=str(lead["id"]),
+                event_type="callback_updated",
+                source_key=f"twilio-inbound:{sid}",
             )
         trace.log("callback_requested", lead_id=str(lead["id"]))
     trace.complete()

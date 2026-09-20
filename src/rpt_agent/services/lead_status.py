@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from ..db import transaction
 from ..observability import WorkflowTrace
+from .sheet_sync import enqueue_sheet_update
 
 CALLBACK_MIN_MINUTES = 5
 CALLBACK_MAX_MINUTES = 240
@@ -438,6 +439,13 @@ def report_lead_status(
             )
             record_status(conn, lead_id, lead["status"], "needs_attention", source, reason)
         conn.execute("update provider_events set processed_at=now() where id=%s", (receipt["id"],))
+        enqueue_sheet_update(
+            conn,
+            lead_id=lead_id,
+            event_type="call_settled",
+            source_key=receipt_id,
+            outreach_event_id=event["id"] if event else None,
+        )
     trace.log("state_transition_applied", reported_status=normalized)
     return "recorded"
 
@@ -582,6 +590,13 @@ def apply_call_outcome(
                 "update test_usage_ledger set outcome=%s where provider='vapi' and provider_ref=%s",
                 (outcome, event["vapi_call_id"]),
             )
+        enqueue_sheet_update(
+            conn,
+            lead_id=lead_id,
+            event_type="call_settled",
+            source_key=f"event:{event_id}:{outcome}",
+            outreach_event_id=event_id,
+        )
         trace.log("database_operation_completed", operation="settle_call")
     trace.log("state_transition_applied", outcome=outcome)
     return "recorded"

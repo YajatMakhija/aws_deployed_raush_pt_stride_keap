@@ -480,8 +480,9 @@ class BookingService:
                     "stride_appointment_id": stride_id,
                 }
                 conn.execute(
-                    "insert into integration_outbox(event_id,event_type,aggregate_id,payload,status) "
-                    "values(%s,'appointment.booked.v1',%s,%s,'pending') on conflict(event_id) do nothing",
+                    "insert into integration_outbox(event_id,event_type,aggregate_id,payload,status,destination) "
+                    "values(%s,'appointment.booked.v1',%s,%s,'pending','keap') "
+                    "on conflict(event_id) do nothing",
                     (event_payload["event_id"], str(local_id), json.dumps(event_payload)),
                 )
         except Exception as exc:  # noqa: BLE001 - Stride is the booking source of truth

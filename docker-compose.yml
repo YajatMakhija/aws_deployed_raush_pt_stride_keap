@@ -23,6 +23,15 @@ services:
     volumes:
       - ./src:/app/src
       - ./logs:/app/logs
+  sheet-worker:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    command: rpt-sheet-worker
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
   mock-provider:
     profiles: ["mock"]
     build: .

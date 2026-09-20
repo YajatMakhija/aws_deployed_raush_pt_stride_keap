@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from ..config import get_settings
 from ..db import transaction
 from ..observability import WorkflowTrace
+from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
 from ..services.provider_http import ProviderError
 from ..services.twilio_service import TwilioService
@@ -136,18 +137,26 @@ class LeadCreate(BaseModel):
     )
     date_of_birth: date
     referred_by: str | None = Field(default=None, max_length=200)
-    lead_type: Literal["Physical Therapy", "Wellness"]
+    lead_type: str = Field(min_length=1, max_length=200)
     location: Literal["Dana Point", "Laguna Niguel", "Mission Viejo"]
     owner: str = Field(min_length=1, max_length=200)
     contact_consent: Literal[True]
 
-    @field_validator("first_name", "last_name", "owner")
+    @field_validator("first_name", "last_name", "lead_type", "owner")
     @classmethod
     def required_text(cls, value: str) -> str:
         value = value.strip()
         if not value:
             raise ValueError("must not be blank")
         return value
+
+    @field_validator("date_of_birth", mode="before")
+    @classmethod
+    def parse_date_of_birth(cls, value: date | datetime | str) -> date:
+        parsed = parse_flexible_date(value)
+        if parsed is None:
+            raise ValueError("date_of_birth is required")
+        return parsed
 
     @field_validator("date_of_birth")
     @classmethod
@@ -399,7 +408,8 @@ def dashboard_snapshot(actor: Actor):
         ).fetchall()
         system = conn.execute(
             "select (select count(*) from provider_events where processed_at is null) as provider_queue,"
-            "(select count(*) from integration_outbox where status in ('pending','sending')) as handoff_queue,"
+            "(select count(*) from integration_outbox where destination='keap' "
+            "and status in ('pending','sending')) as handoff_queue,"
             "(select count(*) from outreach_events where status='unknown') as unknown_events,"
             "(select count(*) from leads where needs_review) as review_queue,"
             # Real counters for the analytics page. These replaced hardcoded
@@ -424,7 +434,8 @@ def dashboard_snapshot(actor: Actor):
             "(select coalesce(sum(cost),0) from call_logs) as voice_cost,"
             "(select count(*) from call_logs) as calls_logged,"
             "(select count(*) from appointments) as stride_appointments,"
-            "(select count(*) from integration_outbox where status='sent') as keap_handoffs"
+            "(select count(*) from integration_outbox where destination='keap' "
+            "and status='delivered') as keap_handoffs"
         ).fetchone()
 
     counts = {"new": 0, "cadence": 0, "attention": 0, "booked": 0, "closed": 0}
@@ -625,8 +636,11 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
             (lead_id,),
         ).fetchall()
         calls = conn.execute(
-            "select id,dialed_at,ended_at,duration_seconds,answer_state,ended_reason,transcript_text,"
-            "summary_text from call_logs where lead_id=%s order by dialed_at desc,id desc",
+            "select cl.id,cl.dialed_at,cl.ended_at,cl.duration_seconds,cl.answer_state,"
+            "cl.ended_reason,coalesce(ct.transcript_text,cl.transcript_text) as transcript_text,"
+            "coalesce(ct.summary,cl.summary_text) as summary_text,ct.transcript_link "
+            "from call_logs cl left join call_transcripts ct on ct.call_log_id=cl.id "
+            "where cl.lead_id=%s order by cl.dialed_at desc,cl.id desc",
             (lead_id,),
         ).fetchall()
         appointments = conn.execute(

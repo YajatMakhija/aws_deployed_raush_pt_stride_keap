@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException, Request
 from fastapi.security import APIKeyHeader
 
-from .config import get_settings
+from .config import Settings, get_settings
 
 # Documentation only: makes Swagger's Authorize button send the header that
 # require_vapi_auth() checks. auto_error=False so it never enforces on its own.
@@ -19,11 +19,85 @@ vapi_secret_scheme = APIKeyHeader(
     description="Paste VAPI_WEBHOOK_SECRET to use Try it out.",
 )
 
+MAX_N8N_INTAKE_BODY_BYTES = 64 * 1024
+
 
 @dataclass(frozen=True)
 class DashboardActor:
     user_id: str
     email: str
+
+
+def timestamped_hmac(secret: str, timestamp: str, body: bytes) -> str:
+    """Sign an exact HTTP body with a replay-protected timestamp."""
+    return hmac.new(
+        secret.encode(), timestamp.encode() + b"." + body, hashlib.sha256
+    ).hexdigest()
+
+
+def _fresh_timestamp(timestamp: str, *, max_age_seconds: int = 300) -> bool:
+    try:
+        return abs(int(time.time()) - int(timestamp)) <= max_age_seconds
+    except (TypeError, ValueError):
+        return False
+
+
+async def require_n8n_intake_auth(request: Request) -> None:
+    """Authenticate the n8n intake caller before parsing any patient data."""
+    settings = get_settings()
+    # Local testing only. Never honor this flag in production/preproduction.
+    if settings.n8n_intake_auth_disabled:
+        if settings.app_env.lower() in {
+            "production",
+            "prod",
+            "preproduction",
+            "preprod",
+            "staging",
+        }:
+            raise HTTPException(
+                status_code=503,
+                detail="N8N_INTAKE_AUTH_DISABLED cannot be used outside local development",
+            )
+        return
+    if not settings.n8n_intake_key_id or not settings.n8n_intake_secret:
+        raise HTTPException(status_code=503, detail="n8n intake is not configured")
+    key_id = request.headers.get("x-rpt-key-id", "")
+    timestamp = request.headers.get("x-rpt-timestamp", "")
+    signature = request.headers.get("x-rpt-signature", "").removeprefix("sha256=")
+    if not hmac.compare_digest(key_id, settings.n8n_intake_key_id):
+        raise HTTPException(status_code=401, detail="invalid n8n credentials: key id mismatch")
+    if not signature:
+        raise HTTPException(status_code=401, detail="invalid n8n credentials: missing signature")
+    if not _fresh_timestamp(timestamp):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid n8n credentials: timestamp expired or invalid (must be within 5 minutes)",
+        )
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > MAX_N8N_INTAKE_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="n8n request body is too large")
+    body = await request.body()
+    if len(body) > MAX_N8N_INTAKE_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="n8n request body is too large")
+    expected = timestamped_hmac(settings.n8n_intake_secret, timestamp, body)
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid n8n credentials: bad signature (secret mismatch or body changed after signing)",
+        )
+
+def n8n_sheet_headers(
+    body: bytes, *, timestamp: str | None = None, settings: Settings | None = None
+) -> dict[str, str]:
+    """Build the signed headers used by the AWS Sheet worker."""
+    settings = settings or get_settings()
+    timestamp = timestamp or str(int(time.time()))
+    return {
+        "Content-Type": "application/json",
+        "X-RPT-Key-Id": settings.n8n_sheet_key_id,
+        "X-RPT-Timestamp": timestamp,
+        "X-RPT-Signature": f"sha256={timestamped_hmac(settings.n8n_sheet_webhook_secret, timestamp, body)}",
+    }
 
 
 def require_dashboard_auth(request: Request) -> DashboardActor:
@@ -54,7 +128,7 @@ async def require_vapi_auth(request: Request) -> None:
     timestamp = request.headers.get("x-vapi-timestamp", "")
     signature = request.headers.get("x-vapi-signature", "")
     try:
-        fresh = abs(int(time.time()) - int(timestamp)) <= 300
+        fresh = _fresh_timestamp(timestamp)
     except ValueError:
         fresh = False
     if settings.vapi_hmac_secret and signature and fresh:

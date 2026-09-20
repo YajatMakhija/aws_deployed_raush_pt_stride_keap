@@ -47,8 +47,10 @@ def test_assistant_audit_rate_limit_index_is_migrated():
 
 def test_deployed_environments_allow_accelerated_test_mode():
     """TEST_MODE only compresses the cadence clock, so a deployed box may enable it."""
+def test_deployed_environments_reject_accelerated_test_mode():
+    """Production must never run an accelerated cadence clock."""
     settings = Settings(app_env="production", test_mode=True)
-    assert not any("TEST_MODE" in error for error in settings.runtime_errors("api"))
+    assert any("TEST_MODE" in error for error in settings.runtime_errors("api"))
 
 
 def test_preproduction_rejects_disabled_database_tls():

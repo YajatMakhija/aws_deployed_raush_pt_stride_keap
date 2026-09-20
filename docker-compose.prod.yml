@@ -3,7 +3,9 @@
 # The dev docker-compose.yml stays for local work (mock provider, source mounts).
 services:
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
     container_name: stride-api
     restart: unless-stopped
     env_file: .env
@@ -22,11 +24,26 @@ services:
 
   # Exactly one worker: the rate governors are process-local.
   worker:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
     container_name: stride-worker
     restart: unless-stopped
     env_file: .env
     command: rpt-worker
+    volumes:
+      - ./logs:/app/logs
+
+  # Separate from patient outreach: a slow Google/n8n request can never delay
+  # a due call or SMS. It idles safely while SHEET_SYNC_ENABLED=false.
+  sheet-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: stride-sheet-worker
+    restart: unless-stopped
+    env_file: .env
+    command: rpt-sheet-worker
     volumes:
       - ./logs:/app/logs
 

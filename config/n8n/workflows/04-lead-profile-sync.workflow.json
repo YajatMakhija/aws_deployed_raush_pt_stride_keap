@@ -1,0 +1,158 @@
+{
+  "name": "RPT - Google Sheet Lead Profile Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {"item": [{"mode": "everyMinute"}]},
+        "documentId": {"__rl": true, "value": "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20", "mode": "list", "cachedResultName": "Copy of Lead_Sheet"},
+        "sheetName": {"__rl": true, "value": 1286805801, "mode": "list", "cachedResultName": "Leads"},
+        "event": "anyUpdate",
+        "includeInOutput": "new",
+        "options": {"columnsToWatch": ["Name", "Phone Number", "Email", "Date Of Birth", "Location", "Title"]}
+      },
+      "id": "04-profile-trigger",
+      "name": "Profile Fields Changed",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [-1000, 0],
+      "credentials": {"googleSheetsTriggerOAuth2Api": {"id": "GnsvTqUhaPfNteUs", "name": "Yajat-sheets"}}
+    },
+    {
+      "parameters": {
+        "conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "has-lead-id", "leftValue": "={{ String($json['Lead ID'] || '').trim() !== '' }}", "rightValue": true, "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"},
+        "options": {}
+      },
+      "id": "04-has-lead-id",
+      "name": "Has Lead ID?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-780, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function normalizePhone(value) {\n  const text = String(value ?? '').trim();\n  if (!text || !/^\\+?[\\d\\s().-]+$/.test(text)) return null;\n  let digits = text.replace(/\\D/g, '');\n  if (digits.startsWith('001') && digits.length === 13) digits = digits.slice(3);\n  else if (digits.startsWith('1') && digits.length === 11) digits = digits.slice(1);\n  if (digits.length !== 10 || !/^[2-9]\\d{2}[2-9]\\d{6}$/.test(digits)) return null;\n  return '+1' + digits;\n}\nfunction normalizeDob(value) {\n  const text = String(value ?? '').trim();\n  const match = text.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})$/);\n  if (match) {\n    const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);\n    const dt = new Date(Date.UTC(year, month - 1, day));\n    if (dt.getUTCFullYear() === year && dt.getUTCMonth() === month - 1 && dt.getUTCDate() === day) return `${year.toString().padStart(4,'0')}-${month.toString().padStart(2,'0')}-${day.toString().padStart(2,'0')}`;\n    return null;\n  }\n  const serial = Number(value);\n  if (!Number.isFinite(serial) || serial < 1 || serial > 100000) return null;\n  return new Date(Date.UTC(1899, 11, 30) + Math.floor(serial) * 86400000).toISOString().slice(0, 10);\n}\nconst secret = 'PASTE_THE_SAME_INTAKE_SECRET_USED_BY_YOUR_ACTION_WORKFLOW';\nif (secret.startsWith('PASTE_')) throw new Error('Set the existing intake secret in this node before activation');\nif (!globalThis.crypto?.subtle || !globalThis.crypto?.randomUUID) throw new Error('Web Crypto is unavailable');\nconst encoder = new TextEncoder();\nconst key = await globalThis.crypto.subtle.importKey('raw', encoder.encode(secret), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);\nconst output = [];\nfor (const [index,item] of $input.all().entries()) {\n  const row = item.json;\n  const oldLeadId = String(row['Lead ID'] ?? '').trim();\n  const sheetPhone = String(row['Phone Number'] ?? '').trim();\n  const phone = normalizePhone(sheetPhone);\n  const dob = normalizeDob(row['Date Of Birth']);\n  const errors = [];\n  if (!oldLeadId) errors.push('Lead ID is required');\n  if (!phone) errors.push('invalid phone number');\n  if (String(row['Date Of Birth'] ?? '').trim() && !dob) errors.push('Date Of Birth must be DD/MM/YYYY');\n  const email = String(row.Email ?? '').trim().toLowerCase();\n  if (email && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(email)) errors.push('invalid email');\n  const requestId = globalThis.crypto.randomUUID();\n  const requestBody = {lead_id:oldLeadId,lead:{full_name:String(row.Name ?? '').trim() || null,phone,email:email || null,date_of_birth:dob,location:String(row.Location ?? '').trim() || null,title:String(row.Title ?? '').trim() || null}};\n  const timestamp = Math.floor(Date.now()/1000).toString();\n  const rawBody = JSON.stringify(requestBody);\n  let signature = '';\n  if (!errors.length) {\n    const signed = await globalThis.crypto.subtle.sign('HMAC', key, encoder.encode(timestamp + '.' + rawBody));\n    signature = 'sha256=' + Array.from(new Uint8Array(signed)).map(byte => byte.toString(16).padStart(2,'0')).join('');\n  }\n  output.push({json:{...row,oldLeadId,sheetPhone,requestId,valid:errors.length===0,validationError:errors.join('; '),requestBody,rawBody,timestamp,signature},pairedItem:{item:index}});\n}\nreturn output;"
+      },
+      "id": "04-build-sign",
+      "name": "Build and Sign Profile Sync",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-560, 0]
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "valid", "leftValue": "={{ $json.valid }}", "rightValue": true, "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "id": "04-valid",
+      "name": "Sync Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-340, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://trustless-nonrenouncing-tonja.ngrok-free.dev/api/v1/integrations/n8n/lead-sync",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "Content-Type", "value": "application/json"}, {"name": "X-RPT-Key-Id", "value": "rausch-pt-sheets"}, {"name": "X-RPT-Timestamp", "value": "={{ $json.timestamp }}"}, {"name": "X-RPT-Signature", "value": "={{ $json.signature }}"}, {"name": "X-Request-ID", "value": "={{ $json.requestId }}"}]},
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.rawBody }}",
+        "options": {"response": {"response": {"fullResponse": true, "neverError": true}}, "timeout": 15000}
+      },
+      "id": "04-post-sync",
+      "name": "POST Lead Sync to AWS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [-100, -100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const sources = $('Build and Sign Profile Sync').all().filter(item => item.json.valid);\nconst byRequest = new Map(sources.map(item => [String(item.json.requestId), item.json]));\nconst output = [];\nfor (const [index,item] of $input.all().entries()) {\n  const response = item.json;\n  const status = Number(response.statusCode || 0);\n  let body = response.body || {};\n  if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }\n  const source = byRequest.get(String(body.request_id || '')) || sources[index]?.json;\n  if (!source) throw new Error('Could not match AWS response to its Sheet row');\n  const success = status === 200 || status === 201;\n  const replacement = success && body.result === 'phone_changed_new_lead';\n  const detail = typeof body.detail === 'string' ? body.detail : (body.code || response.error?.message || 'request rejected');\n  output.push({json:{...source,httpStatus:status,result:body.result || '',newLeadId:body.lead_id || '',replacement,failed:!success,errorText:'Error: ' + String(detail).slice(0,180)},pairedItem:{item:index}});\n}\nreturn output;"
+      },
+      "id": "04-prepare-result",
+      "name": "Prepare Profile Sync Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [140, -100]
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "replacement", "leftValue": "={{ $json.replacement }}", "rightValue": true, "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "id": "04-replacement",
+      "name": "Phone Created New Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [360, -100]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {"__rl": true, "value": "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20", "mode": "list", "cachedResultName": "Copy of Lead_Sheet"},
+        "sheetName": {"__rl": true, "value": 1286805801, "mode": "list", "cachedResultName": "Leads"},
+        "columns": {"mappingMode": "defineBelow", "value": {"Phone Number": "={{ $json.sheetPhone }}", "Lead ID": "={{ $json.newLeadId }}", "Action Status": "Cadence started", "Cadence Day": "", "Cadence events": "", "Outcome": "", "Transcript Link": "={{ 'https://rpt-frontend-pi.vercel.app/leads/' + $json.newLeadId + '/conversations/calls' }}", "Callback At": "", "Action Request ID": "={{ $json.requestId }}", "Action Started At": ""}, "matchingColumns": ["Phone Number"]},
+        "options": {}
+      },
+      "id": "04-write-replacement",
+      "name": "Write Replacement Lead ID",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [600, -220],
+      "credentials": {"googleSheetsOAuth2Api": {"id": "GnsvTqUhaPfNteUs", "name": "Yajat-sheets"}}
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "typeValidation": "strict", "version": 3}, "conditions": [{"id": "failed", "leftValue": "={{ $json.failed }}", "rightValue": true, "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "id": "04-failed",
+      "name": "Sync Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [600, 20]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {"__rl": true, "value": "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20", "mode": "list", "cachedResultName": "Copy of Lead_Sheet"},
+        "sheetName": {"__rl": true, "value": 1286805801, "mode": "list", "cachedResultName": "Leads"},
+        "columns": {"mappingMode": "defineBelow", "value": {"Lead ID": "={{ $json.oldLeadId }}", "Action Status": "={{ $json.errorText }}"}, "matchingColumns": ["Lead ID"]},
+        "options": {}
+      },
+      "id": "04-write-error",
+      "name": "Write Sync Error by Lead ID",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [840, 20],
+      "credentials": {"googleSheetsOAuth2Api": {"id": "GnsvTqUhaPfNteUs", "name": "Yajat-sheets"}}
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {"__rl": true, "value": "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20", "mode": "list", "cachedResultName": "Copy of Lead_Sheet"},
+        "sheetName": {"__rl": true, "value": 1286805801, "mode": "list", "cachedResultName": "Leads"},
+        "columns": {"mappingMode": "defineBelow", "value": {"Lead ID": "={{ $json.oldLeadId }}", "Action Status": "={{ 'Error: ' + $json.validationError }}"}, "matchingColumns": ["Lead ID"]},
+        "options": {}
+      },
+      "id": "04-write-validation",
+      "name": "Write Validation Error by Lead ID",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [-100, 140],
+      "credentials": {"googleSheetsOAuth2Api": {"id": "GnsvTqUhaPfNteUs", "name": "Yajat-sheets"}}
+    }
+  ],
+  "connections": {
+    "Profile Fields Changed": {"main": [[{"node": "Has Lead ID?", "type": "main", "index": 0}]]},
+    "Has Lead ID?": {"main": [[{"node": "Build and Sign Profile Sync", "type": "main", "index": 0}], []]},
+    "Build and Sign Profile Sync": {"main": [[{"node": "Sync Input Valid?", "type": "main", "index": 0}]]},
+    "Sync Input Valid?": {"main": [[{"node": "POST Lead Sync to AWS", "type": "main", "index": 0}], [{"node": "Write Validation Error by Lead ID", "type": "main", "index": 0}]]},
+    "POST Lead Sync to AWS": {"main": [[{"node": "Prepare Profile Sync Result", "type": "main", "index": 0}]]},
+    "Prepare Profile Sync Result": {"main": [[{"node": "Phone Created New Lead?", "type": "main", "index": 0}]]},
+    "Phone Created New Lead?": {"main": [[{"node": "Write Replacement Lead ID", "type": "main", "index": 0}], [{"node": "Sync Failed?", "type": "main", "index": 0}]]},
+    "Sync Failed?": {"main": [[{"node": "Write Sync Error by Lead ID", "type": "main", "index": 0}], []]}
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "meta": {"templateCredsSetupCompleted": true}
+}

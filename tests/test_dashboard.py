@@ -44,6 +44,7 @@ class CreateLeadConnection:
         self.lead_id = uuid4()
         self.audit_written = False
         self.created_is_test = False
+        self.created_lead_type = None
 
     def execute(self, sql, params=None):
         if "from practices where slug='rausch-pt'" in sql:
@@ -52,6 +53,7 @@ class CreateLeadConnection:
             return Result([])
         if "insert into leads" in sql:
             self.created_is_test = bool(params[-2])
+            self.created_lead_type = params[12]
             return Result([{"id": self.lead_id}])
         if "from leads l left join lateral" in sql:
             return Result([{
@@ -68,7 +70,7 @@ class CreateLeadConnection:
                 "last_contacted_at": None,
                 "date_of_birth": date(1990, 1, 1),
                 "referred_by": "Community partner",
-                "lead_type": "Wellness",
+                "lead_type": self.created_lead_type,
                 "location": "Dana Point",
                 "owner": "Sarah Johnson",
                 "is_test": self.created_is_test,
@@ -218,7 +220,7 @@ def test_dashboard_create_lead_persists_and_materializes(monkeypatch):
         "email": "synthetic@example.test",
         "date_of_birth": "1990-01-01",
         "referred_by": "Community partner",
-        "lead_type": "Wellness",
+        "lead_type": "Sports Rehab",
         "location": "Dana Point",
         "owner": "Sarah Johnson",
         "contact_consent": True,
@@ -241,7 +243,7 @@ def test_dashboard_create_lead_persists_and_materializes(monkeypatch):
             json=payload,
         )
         assert response.status_code == 201
-        assert response.json()["lead_type"] == "Wellness"
+        assert response.json()["lead_type"] == "Sports Rehab"
         assert response.json()["cadence_state"] == "active"
         assert response.json()["is_test"] is True
         assert connection.audit_written

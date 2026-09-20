@@ -214,6 +214,17 @@ Provider invoices remain the accounting source of truth because prices can settl
 Provider modes are independent. Changing `VAPI_MODE`, `TWILIO_MODE`, `STRIDE_MODE`, or `KEAP_MODE`
 switches adapters without modifying cadence or booking logic.
 
+## Google Sheets and n8n integration
+
+The signed intake endpoint is `POST /api/v1/integrations/n8n/lead-actions`. It returns the generated or
+existing Lead ID immediately after the database transaction; calls and SMS continue asynchronously through
+the existing outreach worker. The separate `rpt-sheet-worker` polls only n8n-destination outbox rows and
+posts current lead snapshots to the configured n8n webhook. It never contacts patients.
+
+Keep `SHEET_SYNC_ENABLED=false` until migration 023 is applied and the production n8n/Google workflows and
+secrets are verified. See [config/n8n/README.md](config/n8n/README.md) for the exact Sheet and workflow
+contracts.
+
 The Keap integration is the signed, event-ID-deduplicated webhook owned by the Keap team. It is real when
 `KEAP_MODE=real` and `KEAP_HANDOFF_URL` points to that receiver. Direct Keap REST/OAuth contact mutation is
 not implemented because no Keap application/OAuth contract was supplied.

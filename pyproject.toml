@@ -29,6 +29,7 @@ dev = [
 [project.scripts]
 rpt = "rpt_agent.cli:main"
 rpt-worker = "rpt_agent.worker:main"
+rpt-sheet-worker = "rpt_agent.sheet_sync_worker:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rpt_agent"]
