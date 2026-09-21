@@ -107,6 +107,7 @@ def clamp_to_business_hours(when_utc: datetime, tz: ZoneInfo, hours: dict, holid
 
 VALID_OUTCOMES = {
     "booked", "not_interested", "no_answer", "voicemail", "callback", "transferred", "manual",
+    "booking_link",
     "call_opt_out", "do_not_contact",
 }
 
@@ -258,6 +259,7 @@ def report_lead_status(
             "no_answer": "no_answer",
             "call_opt_out": "call_opt_out",
             "do_not_contact": "do_not_contact",
+            "booking_link_sent": "booking_link",
         }.get(normalized, "manual")
         if event:
             conn.execute(

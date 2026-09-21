@@ -175,7 +175,7 @@ def process_pending_integrations(
                         "ambiguous SMS notification; reconcile before retry"
                         if exc.ambiguous else (
                             "SMS notification retries exhausted"
-                            if exc.retryable else "SMS notification failed permanently"
+                            if exc.retryable else "booking link text could not be delivered"
                         ),
                         row["lead_id"],
                     ),

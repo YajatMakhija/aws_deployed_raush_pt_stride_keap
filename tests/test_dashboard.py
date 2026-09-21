@@ -40,17 +40,23 @@ class SnapshotConnection:
 
 
 class CreateLeadConnection:
-    def __init__(self):
+    def __init__(self, existing_phone_owner=None):
         self.lead_id = uuid4()
         self.audit_written = False
         self.created_is_test = False
         self.created_lead_type = None
+        self.existing_phone_owner = existing_phone_owner
 
     def execute(self, sql, params=None):
         if "from practices where slug='rausch-pt'" in sql:
             return Result([{"id": 1, "timezone": "America/Los_Angeles"}])
         if "source_system='dashboard'" in sql:
             return Result([])
+        if "select id,full_name from leads where practice_id=%s and phone_e164=%s" in sql:
+            return Result(
+                [{"id": uuid4(), "full_name": self.existing_phone_owner}]
+                if self.existing_phone_owner else []
+            )
         if "insert into leads" in sql:
             self.created_is_test = bool(params[-2])
             self.created_lead_type = params[12]
@@ -195,6 +201,43 @@ def test_dashboard_snapshot_uses_authenticated_actor(monkeypatch):
         )
         assert response.status_code == 200
         assert response.json()["counts"]["cadence"] == 1
+    finally:
+        get_settings.cache_clear()
+
+
+def test_second_lead_on_the_same_phone_number_is_refused(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = CreateLeadConnection(existing_phone_owner="Rudraksh Mehta")
+
+    @contextmanager
+    def fake_transaction():
+        yield connection
+
+    monkeypatch.setattr(dashboard_routes, "transaction", fake_transaction)
+    monkeypatch.setattr(dashboard_routes, "materialize_cadence", lambda *args: 8)
+    try:
+        response = TestClient(app).post(
+            "/api/v1/dashboard/leads",
+            json={
+                "idempotency_key": "lead-create-dupe",
+                "first_name": "Rudraksh",
+                "last_name": "Copy",
+                "phone": "+15550000001",
+                "date_of_birth": "1990-01-01",
+                "lead_type": "Sports Rehab",
+                "location": "Dana Point",
+                "owner": "Sarah Johnson",
+                "contact_consent": True,
+            },
+            headers={
+                "X-Dashboard-Token": "x" * 32,
+                "X-Dashboard-User-ID": "staff-1",
+                "X-Dashboard-User-Email": "staff@example.test",
+            },
+        )
+        assert response.status_code == 409
+        assert "Rudraksh Mehta" in response.json()["detail"]
     finally:
         get_settings.cache_clear()
 

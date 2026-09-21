@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
@@ -249,6 +250,7 @@ def _lead(row: dict) -> dict:
         "location": row.get("location"),
         "owner": row.get("owner"),
         "is_test": bool(row.get("is_test")),
+        "timezone": row.get("timezone"),
     }
 
 
@@ -354,7 +356,7 @@ def dashboard_snapshot(actor: Actor):
         rows = conn.execute(
             "select l.id,l.full_name,l.phone_e164,l.email,l.source_system,l.status,l.cadence_state,"
             "l.needs_review,l.review_reason,l.created_at,l.last_contacted_at,l.date_of_birth,"
-            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,"
+            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,l.timezone,"
             "current_version.name as cadence_version_name,"
             "(select count(*) from outreach_events progress where progress.lead_id=l.id "
             "and progress.cadence_version_id=current_version.id "
@@ -516,6 +518,19 @@ def create_dashboard_lead(payload: LeadCreate, actor: Actor):
         if existing:
             lead_id = existing["id"]
         else:
+            # The phone number identifies the patient everywhere: Sheet rows,
+            # Twilio replies, VAPI calls. A second lead on the same number makes
+            # every one of those ambiguous, so it is refused here as it is on intake.
+            duplicate = conn.execute(
+                "select id,full_name from leads where practice_id=%s and phone_e164=%s "
+                "order by created_at desc limit 1",
+                (practice["id"], phone),
+            ).fetchone()
+            if duplicate:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{duplicate['full_name']} already uses this phone number.",
+                )
             inserted = conn.execute(
                 "insert into leads(practice_id,source_system,external_referral_id,first_name,"
                 "last_name,full_name,phone_e164,phone_original,email,date_of_birth,timezone,"
@@ -569,7 +584,7 @@ def create_dashboard_lead(payload: LeadCreate, actor: Actor):
         row = conn.execute(
             "select l.id,l.full_name,l.phone_e164,l.email,l.source_system,l.status,l.cadence_state,"
             "l.needs_review,l.review_reason,l.created_at,l.last_contacted_at,l.date_of_birth,"
-            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,"
+            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,l.timezone,"
             "(select count(*) from outreach_events progress where progress.lead_id=l.id "
             "and progress.status<>'planned') as cadence_progress,"
             "(select count(*) from outreach_events total where total.lead_id=l.id) as cadence_total,"
@@ -594,7 +609,7 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
             "select id,practice_id,full_name,first_name,last_name,phone_e164,email,date_of_birth,"
             "source_system,status,status_reason,cadence_state,call_opt_out,sms_opt_out,needs_review,"
             "review_reason,created_at,updated_at,last_contacted_at,callback_requested_at,referred_by,"
-            "lead_type,location,owner,is_test from leads where id=%s",
+            "lead_type,location,owner,is_test,timezone from leads where id=%s",
             (lead_id,),
         ).fetchone()
         if not row:
@@ -959,6 +974,89 @@ def delete_dashboard_lead(lead_id: UUID, actor: Actor):
         )
         conn.execute("delete from leads where id=%s", (lead_id,))
     return {"deleted": str(lead_id), "cascaded_events": events, **removed}
+
+
+class LeadUpdate(BaseModel):
+    """Everything a staff member may correct after intake. Not the phone number:
+    it identifies the patient to the Sheet, Twilio and VAPI, so a change there is
+    a different patient, handled by adding a lead and closing this one."""
+
+    first_name: str | None = Field(default=None, min_length=1, max_length=100)
+    last_name: str | None = Field(default=None, min_length=1, max_length=100)
+    email: str | None = Field(default=None, max_length=320)
+    date_of_birth: date | None = None
+    referred_by: str | None = Field(default=None, max_length=200)
+    lead_type: str | None = Field(default=None, min_length=1, max_length=200)
+    location: Literal["Dana Point", "Laguna Niguel", "Mission Viejo"] | None = None
+    owner: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("first_name", "last_name", "lead_type", "owner", "referred_by")
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str | None) -> str | None:
+        value = (value or "").strip().lower()
+        if not value:
+            return None
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("email is not valid")
+        return value
+
+    @field_validator("date_of_birth", mode="before")
+    @classmethod
+    def parse_date_of_birth(cls, value):
+        return parse_flexible_date(value) if value else None
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def not_future(cls, value: date | None) -> date | None:
+        if value and value > datetime.now(UTC).date():
+            raise ValueError("date_of_birth cannot be in the future")
+        return value
+
+
+@router.patch("/leads/{lead_id}")
+def update_dashboard_lead(lead_id: UUID, payload: LeadUpdate, actor: Actor):
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=422, detail="no fields to update")
+    with transaction() as conn:
+        lead = conn.execute(
+            "select id,practice_id,first_name,last_name from leads where id=%s for update",
+            (lead_id,),
+        ).fetchone()
+        if not lead:
+            raise HTTPException(status_code=404, detail="lead not found")
+        if "first_name" in fields or "last_name" in fields:
+            fields["full_name"] = " ".join(
+                part for part in (
+                    fields.get("first_name", lead["first_name"]),
+                    fields.get("last_name", lead["last_name"]),
+                ) if part
+            )
+        assignments = ",".join(f"{name}=%s" for name in fields)
+        conn.execute(
+            f"update leads set {assignments},updated_at=now() where id=%s",
+            (*fields.values(), lead_id),
+        )
+        _audit(
+            conn,
+            actor,
+            lead["practice_id"],
+            "lead.updated",
+            "lead",
+            str(lead_id),
+            {"fields": sorted(fields)},
+        )
+    return {"status": "updated", "fields": sorted(fields)}
 
 
 @router.post("/leads/{lead_id}/stage")
