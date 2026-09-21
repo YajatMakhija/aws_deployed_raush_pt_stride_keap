@@ -198,14 +198,19 @@ def _start_cadence(
         stored_lead_type = str(
             lead_data.get("lead_type") or lead_data.get("title") or ""
         ).strip() or None
+        # Same rule as dashboard intake: while the deployment runs in test mode
+        # every new lead is a test lead (accelerated cadence, no calling-hours
+        # gate). Flipping TEST_MODE off makes Sheet leads real patients again.
+        settings = get_settings()
+        synthetic = settings.test_mode and settings.app_env.lower() in {"development", "test"}
         inserted = conn.execute(
             "insert into leads(practice_id,source_system,first_name,last_name,full_name,phone_e164,"
             "phone_original,email,date_of_birth,timezone,line_type,consent_captured_at,"
             "consent_source,consent_reference,consent_text_version,status,cadence_state,"
-            "lead_type,location) "
+            "lead_type,location,is_test) "
             "values(%s,'google_sheets',%s,%s,%s,%s,%s,%s,%s,%s,'unknown',"
             "now(),'dashboard_staff_attestation',%s,'google-sheet-staff-attestation-v1',"
-            "'new','pending',%s,%s) returning id",
+            "'new','pending',%s,%s,%s) returning id",
             (
                 practice["id"],
                 first_name,
@@ -219,6 +224,7 @@ def _start_cadence(
                 f"n8n:{request_id}",
                 stored_lead_type,
                 str(lead_data["location"]).strip(),
+                synthetic,
             ),
         ).fetchone()
         lead_id = str(inserted["id"])
