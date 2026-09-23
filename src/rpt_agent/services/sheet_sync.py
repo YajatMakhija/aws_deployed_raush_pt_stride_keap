@@ -177,7 +177,7 @@ def build_sheet_snapshot(
         "select oe.day_offset,coalesce(sm.delivered_at,oe.settled_at,oe.executed_at,oe.updated_at) "
         "as finished_at from outreach_events oe "
         "left join sms_messages sm on sm.outreach_event_id=oe.id "
-        "where oe.lead_id=%s and oe.day_offset is not null "
+        "where oe.lead_id=%s "
         "and (%s::timestamptz is null or oe.created_at>=%s::timestamptz) and ("
         "(oe.channel='call' and oe.status in ('delivered','failed','unknown') "
         "and oe.settled_at is not null) or "
@@ -194,7 +194,7 @@ def build_sheet_snapshot(
             "select oe.id,oe.channel,oe.status,oe.outcome,sm.delivery_status,"
             "coalesce(sm.delivered_at,oe.settled_at,oe.executed_at,oe.updated_at) as finished_at "
             "from outreach_events oe left join sms_messages sm on sm.outreach_event_id=oe.id "
-            "where oe.lead_id=%s and oe.day_offset=%s "
+            "where oe.lead_id=%s and oe.day_offset is not distinct from %s "
             "and (%s::timestamptz is null or oe.created_at>=%s::timestamptz) and ("
             "(oe.channel='call' and oe.status in ('delivered','failed','unknown') "
             "and oe.settled_at is not null) or "
@@ -203,7 +203,11 @@ def build_sheet_snapshot(
             "order by finished_at,oe.id",
             (lead_id, latest["day_offset"], run_started_at, run_started_at),
         ).fetchall()
-        cadence_day = f"Day {int(latest['day_offset'])}"
+        cadence_day = (
+            f"Day {int(latest['day_offset'])}"
+            if latest["day_offset"] is not None
+            else "Callback"
+        )
 
     cadence, call_outcome, message_outcome, email_outcome = format_cadence_columns(events, lead)
     _, cadence_status = format_cadence_result(events, lead)

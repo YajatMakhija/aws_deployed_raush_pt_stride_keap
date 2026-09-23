@@ -454,6 +454,36 @@ class _SnapshotConnection:
         raise AssertionError(query)
 
 
+class _CallbackSnapshotConnection(_SnapshotConnection):
+    """The call a patient asked for carries no day number."""
+
+    def execute(self, query, params=None):
+        if "select oe.day_offset" in query:
+            return _Rows(one={"day_offset": None, "finished_at": datetime.now(UTC)})
+        if "select oe.id,oe.channel" in query:
+            assert "is not distinct from" in query, query
+            return _Rows(many=[{
+                "id": 9,
+                "channel": "call",
+                "status": "delivered",
+                "outcome": "not_interested",
+                "delivery_status": None,
+            }])
+        return super().execute(query, params)
+
+
+def test_callback_call_reaches_the_sheet():
+    """A standalone callback has no day_offset, which the Sheet query used to
+    filter out - so the row stopped updating at the last numbered day even
+    though a later call had happened."""
+    snapshot = build_sheet_snapshot(
+        _CallbackSnapshotConnection(),
+        "00000000-0000-0000-0000-000000000002",
+    )
+    assert snapshot["sheet"]["cadence_day"] == "Callback"
+    assert snapshot["sheet"]["call_outcome"] == "Answered - declined"
+
+
 def test_sheet_snapshot_uses_lead_id_and_current_database_truth():
     snapshot = build_sheet_snapshot(
         _SnapshotConnection(),
