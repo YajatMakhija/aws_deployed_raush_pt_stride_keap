@@ -88,3 +88,28 @@ def test_undelivered_cadence_sms_pauses_for_review():
     assert len(skip) == 1
     assert skip[0][1][0] == "paused_for_review"
     assert skip[0][1][1] == "lead-1"
+
+
+def test_hang_up_during_intro_is_not_a_refusal():
+    """Rohan confirmed his name and hung up while Sarah introduced herself. The
+    summary read that as "declined" and closed his outreach. Only the patient
+    saying no may end it."""
+    from rpt_agent.services.delivery import _patient_refused
+
+    rohan = {"artifact": {"messages": [
+        {"role": "user", "message": "Hello?"},
+        {"role": "bot", "message": "Hi. Am I speaking with Rohan?"},
+        {"role": "user", "message": "Yes."},
+        {"role": "bot", "message": "Great. This is Sarah calling from Rausch"},
+    ]}}
+    assert not _patient_refused(rohan)
+
+    refused = {"artifact": {"messages": [
+        {"role": "bot", "message": "Would you like to schedule?"},
+        {"role": "user", "message": "No, I’m not interested, please don’t call again."},
+    ]}}
+    assert _patient_refused(refused)
+
+    # Transcript-only reports (no message list) are read the same way.
+    assert _patient_refused({"artifact": {"transcript": "AI: Hi\nUser: stop calling me"}})
+    assert not _patient_refused({"artifact": {"transcript": "AI: not interested?\nUser: Yes."}})
