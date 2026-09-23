@@ -25,7 +25,13 @@ def restore_pause_skipped(conn, lead_id: str) -> int:
 
 
 def flag_lead_for_review(conn, lead_id: str, reason: str) -> None:
-    """Pause non-terminal outreach whenever staff attention is required."""
+    """Pause non-terminal outreach whenever staff attention is required.
+
+    This owns the outcome staff see: the lead's status and the reason. Migration
+    030's trigger is the fail-safe for paths that never get here (a stale worker,
+    a manual SQL fix) and deliberately does less - it flags, pauses and stops the
+    schedule, but never sets leads.status. Change one, check the other.
+    """
     conn.execute(
         "update leads set needs_review=true,review_reason=%s,review_flagged_at=now(),"
         "status=case when status in ('booked','declined','do_not_contact','closed_no_response',"
