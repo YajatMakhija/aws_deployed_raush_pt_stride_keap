@@ -15,6 +15,12 @@ from ..observability import WorkflowTrace
 from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
 from ..services.provider_http import ProviderError
+from ..services.review import (
+    flag_lead_for_review,
+    restore_pause_skipped,
+    skip_remaining_planned,
+)
+from ..services.sheet_sync import enqueue_sheet_update
 from ..services.twilio_service import TwilioService
 from ..worker import format_phone, materialize_cadence
 
@@ -170,8 +176,6 @@ class LeadCreate(BaseModel):
 CLOSED_STATUSES = frozenset(
     {
         "declined",
-        "transferred_human",
-        "booking_link_sent",
         "do_not_contact",
         "closed_no_response",
         "invalid_phone",
@@ -186,7 +190,7 @@ def _stage(row: dict) -> str:
     if row["needs_review"] or row["status"] == "needs_attention":
         return "attention"
     # A finished lead is not in cadence. Without this it falls through below and
-    # a declined or transferred patient keeps showing as actively worked.
+    # a declined patient keeps showing as actively worked.
     if row["status"] in CLOSED_STATUSES or row["cadence_state"] in {"completed", "terminated"}:
         return "closed"
     if row["status"] == "new" or row["cadence_state"] == "pending":
@@ -753,6 +757,10 @@ def update_lead_cadence(lead_id: UUID, payload: CadenceAction, actor: Actor):
             raise HTTPException(status_code=409, detail="terminal leads cannot resume cadence")
         new_state = "paused" if payload.action == "pause" else "active"
         shifted = 0
+        if payload.action == "pause":
+            # Soft cadence_state alone is not enough when a remote worker is stale;
+            # skip remaining planned steps so nothing else can be claimed.
+            skip_remaining_planned(conn, str(lead_id))
         if payload.action == "resume":
             # Pause has to mean postpone, not suspend. The schedule keeps running
             # while a lead is paused, so without this every step that fell due
@@ -763,6 +771,7 @@ def update_lead_cadence(lead_id: UUID, payload: CadenceAction, actor: Actor):
             # spacing the cadence was designed with: day 5 still lands two days
             # after day 3. The pause start comes from the audit trail, which is
             # already the record of when it happened.
+            restore_pause_skipped(conn, str(lead_id))
             paused_at = conn.execute(
                 "select created_at from dashboard_audit_log where entity_type='lead' "
                 "and entity_id=%s and action='cadence.pause' order by created_at desc limit 1",
@@ -1114,6 +1123,7 @@ def move_lead_stage(lead_id: UUID, payload: StageMove, actor: Actor):
                 "review_flagged_at=now(),cadence_state='paused',status_changed_at=now() where id=%s",
                 ("moved to review from the board", lead_id),
             )
+            skip_remaining_planned(conn, str(lead_id))
         elif payload.stage == "closed":
             conn.execute(
                 "update leads set status='declined',cadence_state='terminated',needs_review=false,"
@@ -1127,25 +1137,20 @@ def move_lead_stage(lead_id: UUID, payload: StageMove, actor: Actor):
                 (lead_id,),
             )
         else:  # booked
-            # Booked is a claim about the outside world, so it needs a real appointment.
-            appointment = conn.execute(
-                "select id from appointments where lead_id=%s and state='scheduled' limit 1",
-                (lead_id,),
-            ).fetchone()
-            if not appointment:
-                raise HTTPException(
-                    status_code=409,
-                    detail="booked requires a confirmed appointment on the lead",
-                )
+            # Stride is not connected, so nobody can confirm an appointment from
+            # our side: the front desk moving the card here is the booking. It is
+            # the one outcome that ends outreach, and the Sheet has to hear it.
             conn.execute(
                 "update leads set status='booked',cadence_state='completed',needs_review=false,"
                 "status_changed_at=now() where id=%s",
                 (lead_id,),
             )
-            conn.execute(
-                "update outreach_events set status='skipped',updated_at=now() "
-                "where lead_id=%s and status='planned'",
-                (lead_id,),
+            skip_remaining_planned(conn, str(lead_id), "lead booked")
+            enqueue_sheet_update(
+                conn,
+                lead_id=str(lead_id),
+                event_type="lead_booked",
+                source_key=f"dashboard:{lead_id}:{datetime.now(UTC).isoformat()}",
             )
 
         # to_status is a lead status, not a board stage. Recording payload.stage
@@ -1823,9 +1828,8 @@ def send_manual_sms(
                 (status, exc.code, request_id),
             )
             if status == "unknown":
-                conn.execute(
-                    "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
-                    ("manual SMS result requires provider reconciliation", lead_id),
+                flag_lead_for_review(
+                    conn, str(lead_id), "manual SMS result requires provider reconciliation"
                 )
             _audit(
                 conn, actor, lead["practice_id"], f"sms.manual_{status}", "lead", str(lead_id),

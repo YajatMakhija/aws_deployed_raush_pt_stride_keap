@@ -906,6 +906,70 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   `105 passed, 3 skipped` and Ruff passed; frontend ESLint, TypeScript, and Vinext production build passed after
   restoring `node_modules` with `npm ci`. Node 26 produced the expected engine warning because the project
   declares Node 22.x.
+### 2026-09-23 - DB skip fail-safe applied (migration 028)
+
+- Applied `028_pause_failed_outreach_for_review`: any outreach event moving to
+  `failed`/`unknown` now pauses the lead and marks remaining `planned` events
+  `skipped` (`paused_for_review`) in Postgres, even when a stale remote worker
+  only sets `needs_review`.
+- Repaired stuck lead `27b8690e-…` (same pattern: SMS Twilio 400, still active
+  with Day 9/13 planned) by skipping those steps.
+- Closed remaining app paths that flagged review without skipping (board
+  attention stage; unrecognized / fallback call outcomes).
+
+### 2026-09-23 - Claim gate blocks needs_review; repair stale-worker pause gap
+
+- Root cause of “Needs Review but calls continue”: the remote cadence worker that
+  holds the advisory lock still ran an older `flag_lead_for_review` that set
+  `needs_review` without `cadence_state='paused'` or skipping remaining planned
+  steps. `CLAIM_SQL` only required `cadence_state='active'`, so later days kept
+  firing (example: Day 0 SMS fail, then Day 3/5 calls still delivered).
+- `CLAIM_SQL` now also requires `not l.needs_review`.
+- One stuck lead left `active` with planned Day 9/13 SMS was paused and those
+  steps skipped via `flag_lead_for_review`. Local worker still cannot start until
+  the remote lock is released / that worker is redeployed with this code.
+
+### 2026-09-23 - Hard-stop pause on SMS fail / wrong number; Outcome labels
+
+- SMS failure and review pauses now also mark remaining `planned` outreach events
+  `skipped` with `failure_reason=paused_for_review`, so later calls cannot be claimed
+  even if `cadence_state` pause is missed by a stale worker.
+- Wrong-number (`wrong_person`) pauses the lead and skips remaining planned steps.
+- Decline (`not_interested`) already terminates and skips; Sheet Outcome stays
+  `Answered - declined`. SMS failure Outcome is `Not delivered`; wrong number is
+  `Wrong number`.
+- Dashboard Resume restores only `paused_for_review` skips back to `planned`, then
+  shifts schedules. Migration 028 (unapplied) updated to match the skip fail-safe.
+- No live DB migration was applied in this change.
+
+### 2026-09-23 - Sheet Outcome uses comma instead of pipe
+
+- Combined Call+SMS Outcome (`cadence_status`) now formats as `Call: No answer, SMS: Delivered`
+  instead of `Call: No answer | SMS: Delivered`.
+
+### 2026-09-23 - Separate Sheet outcomes and review-pausing rules
+
+- Added separate Sheet snapshot fields for Call Outcome, Message Outcome, Email Outcome, and Needs Review.
+- Added the team-owned Sheet `Booked` action. Booked and declined stop cadence; wrong-number/person outcomes
+  and failed/undelivered SMS pause cadence for review. Booking links and call transfers no longer stop cadence.
+- Added unapplied migration 028 as a database fail-safe so terminal outreach failures pause the lead for review.
+- Focused backend validation passed: `42 passed`. n8n must accept/map the new fields before this backend is deployed.
+
+### 2026-09-23 - Booked-safe n8n intake guard
+
+- Updated Workflow 01 to accept the Sheet `Booked` command and display the backend `booked_applied` result.
+- Replaced the blank-only gate with an action-aware guard that ignores n8n's own Processing, Retrying, Error,
+  and completed-result writes, preventing polling loops while allowing a newly selected Booked action.
+
+### 2026-09-23 - Local n8n intake test setup
+
+- Built and started only the Docker `api` service on port 8000; cadence and Sheet workers remain stopped.
+- Local health passed and the signed intake endpoint accepted authentication, returning the expected validation
+  error for a deliberately incomplete non-mutating request.
+- The configured ngrok domain is offline because no ngrok agent/package or auth config is present locally.
+  Do not run a real Sheet intake against the shared Supabase database until the tunnel is restored and a safe
+  test number is confirmed.
+
 ### 2026-09-20 - Day 0 SMS Sheet trace
 
 - Read-only tracing confirmed the latest Google-Sheets test lead's Day 0 SMS was attempted but Twilio rejected
@@ -1510,3 +1574,35 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - Added `Dockerfile.prod`; production images contain application code and migrations, not tests, fixtures, or
   development reset SQL. Automated tests remain in the repository for CI and regression protection.
 - Final validation: `142 passed, 3 skipped`; Ruff and production Compose validation passed.
+
+### 2026-09-23 - Sheet outcome webhook compatibility repair
+
+- Removed three local diagnostic scripts that contained a test lead identifier and direct database dump
+  queries; they were never tracked application files.
+- Updated the AWS-to-n8n webhook workflow to accept and write `Needs Review`, `Call Outcome`,
+  `Message Outcome`, and `Email Outcome`. The previous validator rejected the backend's new snapshot with
+  HTTP 400, leaving Sheet outbox work in retry instead of updating Google Sheets.
+- Added `Booked` to the recovery workflow and replaced the profile workflow's obsolete ngrok URL and inline
+  secret placeholder with the shared n8n environment configuration. HMAC verification behavior was not
+  changed.
+- Validation: all four workflow exports parse successfully; `178 passed, 3 skipped`; Ruff, Compose
+  configuration, diff checks, API health, and the running Sheet worker were checked successfully.
+
+### 2026-09-23 - Sheet restart always begins at Day 0
+
+- `Restart cadence` removes unfinished planned/skipped events and materializes a completely fresh cadence
+  from Day 0, regardless of whether the previous run was paused or completed.
+- `Booked` remains terminal: it marks the cadence completed and skips all remaining planned outreach.
+- Validation: `180 passed, 3 skipped`; Ruff, workflow JSON parsing, and diff checks passed.
+
+### 2026-09-23 - Booked action database compatibility
+
+- Added migration 029 so the durable Sheet action ledger accepts the `booked` command already handled by
+  the API and n8n workflows.
+- Kept migration 028 immutable after it appeared on the pushed branch. Migration 029 replaces its trigger
+  function so failed or unknown outreach also skips the remaining planned cadence steps.
+- Removed the obsolete profile-sync replacement-lead branch. A changed phone remains a review error and
+  profile-sync errors are matched back to the existing row by Lead ID.
+- Final review fixed retrying a completed cadence, blocked restart for booked/DNC/known-wrong-number leads,
+  preserved the booking-link call outcome, routed Sheet updates with the newest completed action request,
+  and made profile sync use the configured intake key ID.

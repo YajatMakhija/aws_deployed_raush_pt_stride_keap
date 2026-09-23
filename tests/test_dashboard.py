@@ -380,6 +380,40 @@ class RestartConnection:
         return Result([])
 
 
+def test_board_booked_stops_outreach_and_tells_the_sheet(monkeypatch):
+    """Stride is not connected, so the front desk moving the card is the booking.
+
+    It has to end outreach and reach the Sheet; requiring an appointment row made
+    the column unusable.
+    """
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    connection = RestartConnection()
+
+    @contextmanager
+    def fake_transaction():
+        yield connection
+
+    monkeypatch.setattr(dashboard_routes, "transaction", fake_transaction)
+    try:
+        response = TestClient(app).post(
+            f"/api/v1/dashboard/leads/{connection.lead_id}/stage",
+            json={"stage": "booked"},
+            headers={
+                "X-Dashboard-Token": "x" * 32,
+                "X-Dashboard-User-ID": "staff-1",
+                "X-Dashboard-User-Email": "staff@example.test",
+            },
+        )
+        assert response.status_code == 200, response.json()
+        statements = connection.statements
+        assert any("status='booked'" in sql and "cadence_state='completed'" in sql for sql in statements)
+        assert any("update outreach_events set status='skipped'" in sql for sql in statements)
+        assert any("insert into integration_outbox" in sql for sql in statements), statements
+    finally:
+        get_settings.cache_clear()
+
+
 def test_restart_clears_skipped_steps_not_only_planned(monkeypatch):
     """A lead closed before a restart has leftovers marked 'skipped'.
 

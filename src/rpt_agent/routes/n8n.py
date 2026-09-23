@@ -69,7 +69,7 @@ class SheetLeadInput(BaseModel):
 class LeadActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["start_cadence", "restart_cadence", "do_not_contact"]
+    action: Literal["start_cadence", "restart_cadence", "do_not_contact", "booked"]
     lead_id: UUID | None = None
     lead: SheetLeadInput
 

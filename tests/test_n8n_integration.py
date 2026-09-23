@@ -23,6 +23,7 @@ from rpt_agent.services.sheet_sync import (
     build_sheet_snapshot,
     dashboard_call_link,
     enqueue_sheet_update,
+    format_cadence_columns,
     format_cadence_result,
     format_callback_time,
 )
@@ -363,7 +364,23 @@ def test_sheet_result_combines_call_and_sms():
         lead,
     )
     assert event_label == "Call + SMS"
-    assert outcome == "Call: No answer | SMS: Delivered"
+    assert outcome == "Call: No answer, SMS: Delivered"
+
+
+def test_sheet_result_has_separate_outcome_columns():
+    cadence, call, message, email = format_cadence_columns(
+        [
+            {"channel": "call", "status": "delivered", "outcome": "transferred"},
+            {"channel": "sms", "status": "failed", "delivery_status": "undelivered"},
+        ],
+        {"status": "transferred_human", "cadence_state": "paused"},
+    )
+    assert (cadence, call, message, email) == (
+        "Call + SMS",
+        "Call transferred",
+        "Not delivered",
+        None,
+    )
 
 
 def test_sheet_result_marks_missing_sms_callback_for_review():
@@ -383,6 +400,7 @@ def test_sheet_action_status_only_for_system_outcomes():
     assert _action_label({"status": "closed_no_response", "cadence_state": "completed"}) == (
         "Cadence completed"
     )
+    assert _action_label({"status": "booked", "cadence_state": "completed"}) == "Booked"
 
 
 class _Rows:
@@ -405,8 +423,13 @@ class _SnapshotConnection:
                 "id": UUID("00000000-0000-0000-0000-000000000002"),
                 "status": "callback_scheduled",
                 "cadence_state": "active",
+                "needs_review": True,
                 "callback_requested_at": datetime(2026, 9, 20, 18, 0, tzinfo=UTC),
                 "timezone": "America/Los_Angeles",
+            })
+        if query.startswith("select request_id from lead_action_requests"):
+            return _Rows(one={
+                "request_id": UUID("00000000-0000-0000-0000-000000000003"),
             })
         if "from lead_action_requests where lead_id" in query:
             return _Rows(one={
@@ -438,12 +461,18 @@ def test_sheet_snapshot_uses_lead_id_and_current_database_truth():
         practice_slug="rausch-pt",
     )
     assert snapshot["lead_id"] == "00000000-0000-0000-0000-000000000002"
-    assert snapshot["action_request_id"] == "00000000-0000-0000-0000-000000000001"
+    # Row matching follows the newest completed Sheet command, while cadence
+    # history still uses the cadence-start request as its time anchor.
+    assert snapshot["action_request_id"] == "00000000-0000-0000-0000-000000000003"
     # Intake owns Action Status / Lead ID; outreach snapshots omit action_status.
     assert "action_status" not in snapshot["sheet"]
     assert snapshot["sheet"]["cadence_day"] == "Day 0"
     assert snapshot["sheet"]["cadence"] == "Call"
     assert snapshot["sheet"]["cadence_status"] == "Callback requested"
+    assert snapshot["sheet"]["call_outcome"] == "Callback requested"
+    assert snapshot["sheet"]["message_outcome"] is None
+    assert snapshot["sheet"]["email_outcome"] is None
+    assert snapshot["sheet"]["needs_review"] == "Needs Review"
     assert snapshot["sheet"]["callback_at"] == "Sep 20, 2026 at 11:00 AM PT"
 
 
@@ -609,6 +638,116 @@ def test_start_cadence_rejects_duplicate_phone_without_writing(monkeypatch):
     assert not any(query.startswith("update leads") for query in conn.queries)
 
 
+def test_sheet_team_can_mark_booked_without_an_appointment():
+    lead_id = UUID("00000000-0000-0000-0000-000000000002")
+
+    class Connection:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, params=None):
+            normalized = " ".join(query.split())
+            self.queries.append((normalized, params))
+            if normalized.startswith("select id,practice_id,status"):
+                return _Rows(one={
+                    "id": lead_id,
+                    "practice_id": 1,
+                    "status": "in_progress",
+                    "cadence_state": "active",
+                    "call_opt_out": False,
+                    "sms_opt_out": False,
+                    "phone_e164": "+15555550100",
+                })
+            return _Rows()
+
+    conn = Connection()
+    result = lead_actions._mark_booked(
+        conn,
+        request_id=UUID("00000000-0000-0000-0000-000000000001"),
+        practice={"id": 1},
+        lead_id=lead_id,
+        phone="+15555550100",
+    )
+
+    assert result.body["result"] == "booked_applied"
+    statements = [query for query, _ in conn.queries]
+    assert any("status='booked',cadence_state='completed'" in query for query in statements)
+    assert any("status='skipped'" in query for query in statements)
+    assert not any("from appointments" in query for query in statements)
+
+
+class _RestartConnection:
+    def __init__(self, cadence_state: str):
+        self.cadence_state = cadence_state
+        self.queries: list[tuple[str, object]] = []
+
+    def execute(self, query, params=None):
+        normalized = " ".join(query.split())
+        self.queries.append((normalized, params))
+        if normalized.startswith("select id,practice_id,status,cadence_state"):
+            return _Rows(one={
+                "id": UUID("00000000-0000-0000-0000-000000000002"),
+                "practice_id": 1,
+                "status": "needs_attention" if self.cadence_state == "paused" else "closed_no_response",
+                "cadence_state": self.cadence_state,
+                "call_opt_out": False,
+                "sms_opt_out": False,
+                "phone_e164": "+15555550100",
+            })
+        if normalized.startswith("select exists"):
+            return _Rows(one={"unresolved": False})
+        return _Rows()
+
+
+@pytest.mark.parametrize("previous_state", ["paused", "completed"])
+def test_restart_always_starts_again_from_day_zero(monkeypatch, previous_state):
+    conn = _RestartConnection(previous_state)
+    materialized = []
+    monkeypatch.setattr(
+        lead_actions,
+        "materialize_cadence",
+        lambda *args, **kwargs: materialized.append((args, kwargs)) or 8,
+    )
+
+    result = lead_actions._restart_cadence(
+        conn,
+        request_id=UUID("00000000-0000-0000-0000-000000000001"),
+        practice={"id": 1},
+        lead_id=UUID("00000000-0000-0000-0000-000000000002"),
+        phone="+15555550100",
+    )
+
+    statements = [query for query, _ in conn.queries]
+    assert result.body["result"] == "cadence_restarted"
+    assert result.body["cadence_event_count"] == 8
+    assert materialized
+    assert any(query.startswith("delete from outreach_events") for query in statements)
+
+
+@pytest.mark.parametrize("status", ["booked", "do_not_contact", "invalid_phone"])
+def test_restart_refuses_terminal_or_unsafe_leads(status):
+    conn = _RestartConnection("paused")
+    original_execute = conn.execute
+
+    def execute(query, params=None):
+        result = original_execute(query, params)
+        if "select id,practice_id,status,cadence_state" in " ".join(query.split()):
+            result.one["status"] = status
+        return result
+
+    conn.execute = execute
+    with pytest.raises(lead_actions.LeadActionError) as exc_info:
+        lead_actions._restart_cadence(
+            conn,
+            request_id=UUID("00000000-0000-0000-0000-000000000001"),
+            practice={"id": 1},
+            lead_id=UUID("00000000-0000-0000-0000-000000000002"),
+            phone="+15555550100",
+        )
+
+    assert exc_info.value.code == "restart_not_allowed"
+
+
 def test_sheet_webhook_uses_separate_hmac_secret(monkeypatch):
     monkeypatch.setenv("N8N_SHEET_KEY_ID", "aws-sheet-worker")
     monkeypatch.setenv("N8N_SHEET_WEBHOOK_SECRET", "outbound-secret-that-is-long-enough")
@@ -669,6 +808,14 @@ def test_migration_and_worker_routing_contracts():
     )
     assert "drop constraint if exists leads_lead_type_check" in free_text_sql
     assert "create index" not in free_text_sql.lower()
+    review_sql = Path("supabase/migrations/029_sheet_booked_and_review_pause.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "'do_not_contact', 'booked'" in review_sql
+    assert "new.status in ('failed', 'unknown')" in review_sql
+    assert "cadence_state = 'paused'" in review_sql
+    assert "status = 'skipped'" in review_sql
+    assert "paused_for_review" in review_sql
 
     from rpt_agent.services import delivery
 
@@ -714,7 +861,19 @@ def test_profile_sync_workflow_matches_the_database_lead_id():
     assert "lead_id:oldLeadId" in build
     assert "row['Lead ID']" in build
     request = nodes["POST Lead Sync to AWS"]["parameters"]
-    assert request["url"].endswith("/api/v1/integrations/n8n/lead-sync")
+    assert "/api/v1/integrations/n8n/lead-sync" in request["url"]
+    assert "RPT_BACKEND_BASE_URL" in request["url"]
+    assert "$env.RPT_N8N_INTAKE_SECRET" in build
+    assert any(
+        header["name"] == "X-RPT-Key-Id"
+        and "RPT_N8N_INTAKE_KEY_ID" in header["value"]
+        for header in request["headerParameters"]["parameters"]
+    )
+    assert "Phone Created New Lead?" not in nodes
+    assert "Write Replacement Lead ID" not in nodes
+    assert workflow["connections"]["Prepare Profile Sync Result"]["main"][0][0][
+        "node"
+    ] == "Sync Failed?"
     error_update = nodes["Write Sync Error by Lead ID"]["parameters"]
     assert error_update["columns"]["matchingColumns"] == ["Lead ID"]
 
@@ -811,23 +970,69 @@ def test_n8n_sheet_results_target_the_latest_action_request_row():
     ]
     assert "action_request_id" in verify
     assert "Action Request ID" in prepare_update
+    assert all(
+        field in verify
+        for field in (
+            "call_outcome",
+            "message_outcome",
+            "email_outcome",
+            "needs_review",
+        )
+    )
+    update_columns = webhook_nodes["Update System Columns by Phone"]["parameters"][
+        "columns"
+    ]["value"]
+    assert "Outcome" not in update_columns
+    assert {
+        "Needs Review",
+        "Call Outcome",
+        "Message Outcome",
+        "Email Outcome",
+    }.issubset(update_columns)
 
 
-def test_n8n_intake_stops_when_action_status_is_not_blank():
+def test_n8n_recovery_supports_booked_action():
+    workflow = json.loads(
+        Path("config/n8n/workflows/02-lead-action-recovery.workflow.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    nodes = {node["name"]: node for node in workflow["nodes"]}
+    build = nodes["Build Recovery Requests"]["parameters"]["jsCode"]
+    prepare = nodes["Prepare Recovery Result"]["parameters"]["jsCode"]
+    assert "'Booked':'booked'" in build
+    assert "booked_applied:'Booked'" in prepare
+
+
+def test_n8n_intake_processes_each_supported_action_once_without_update_loops():
     workflow = json.loads(
         Path("config/n8n/workflows/01-lead-action-intake.workflow.json").read_text(
             encoding="utf-8"
         )
     )
     nodes = {node["name"]: node for node in workflow["nodes"]}
-    condition = nodes["Action Status Empty?"]["parameters"]["conditions"]["conditions"][0]
+    guard_name = "Action Needs Processing?"
+    condition = nodes[guard_name]["parameters"]["conditions"]["conditions"][0]
+    guard = condition["leftValue"]
+    validate = nodes["Validate and Build Intake"]["parameters"]["jsCode"]
+    prepare = nodes["Prepare Intake Sheet Result"]["parameters"]["jsCode"]
+    sign = nodes["Sign Intake Request"]["parameters"]["jsCode"]
 
-    assert "Action Status" in condition["leftValue"]
-    assert "trim() === ''" in condition["leftValue"]
+    assert all(action in guard for action in (
+        "Start cadence", "Restart cadence", "Do not contact", "Booked"
+    ))
+    assert all(state in guard for state in ("processing:", "retrying "))
+    assert "status.startsWith('error:')" not in guard
+    assert "if (action === 'Restart cadence') return true" in guard
+    assert "status === 'booked'" in guard
+    assert "'Booked':'booked'" in validate
+    assert "booked_applied" in prepare
+    assert "$env.RPT_N8N_INTAKE_SECRET" in sign
+    assert "const secret = \"" not in sign
     assert workflow["connections"]["Google Sheets Trigger"]["main"][0][0]["node"] == (
-        "Action Status Empty?"
+        guard_name
     )
-    assert workflow["connections"]["Action Status Empty?"]["main"][0][0]["node"] == (
+    assert workflow["connections"][guard_name]["main"][0][0]["node"] == (
         "Validate and Build Intake"
     )
-    assert workflow["connections"]["Action Status Empty?"]["main"][1] == []
+    assert workflow["connections"][guard_name]["main"][1] == []

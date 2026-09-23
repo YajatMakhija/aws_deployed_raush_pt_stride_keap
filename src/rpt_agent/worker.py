@@ -23,6 +23,7 @@ from .services.delivery import (
     reprocess_failed_twilio_events,
     reprocess_failed_vapi_events,
 )
+from .services.review import flag_lead_for_review
 from .services.sheet_sync import enqueue_sheet_update
 from .usage_report import record_test_usage
 
@@ -223,6 +224,7 @@ with eligible as (
  join practices p on p.id=l.practice_id
  join practice_settings ps on ps.practice_id=l.practice_id
  where oe.status='planned' and oe.scheduled_for<=now() and l.cadence_state='active'
+ and not l.needs_review
  and l.status not in ('booked','declined','do_not_contact','invalid_phone')
  and ((oe.channel='call' and not l.call_opt_out) or (oe.channel='sms' and not l.sms_opt_out))
  and (oe.channel<>'call' or coalesce(l.line_type,'unknown')<>'mobile' or l.consent_captured_at is not null)
@@ -387,9 +389,8 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
             "and executed_at<now()-interval '2 hours' returning id,lead_id"
         ).fetchall()
         for row in stuck:
-            conn.execute(
-                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
-                ("ambiguous provider dispatch; do not retry", row["lead_id"]),
+            flag_lead_for_review(
+                conn, row["lead_id"], "ambiguous provider dispatch; do not retry"
             )
             enqueue_sheet_update(
                 conn,
@@ -401,11 +402,7 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
         for row in orphaned:
             # A lead whose cadence already ended has nothing left to act on, so
             # settling its stale event must not drag it back into the review queue.
-            conn.execute(
-                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
-                "where id=%s and cadence_state not in ('completed','terminated')",
-                ("call outcome not reported", row["lead_id"]),
-            )
+            flag_lead_for_review(conn, row["lead_id"], "call outcome not reported")
             if row["vapi_call_id"]:
                 conn.execute(
                     "update test_usage_ledger set status='ended',outcome='manual',"
@@ -421,11 +418,7 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
                 outreach_event_id=row["id"],
             )
         for row in stale_sms:
-            conn.execute(
-                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
-                "where id=%s and cadence_state not in ('completed','terminated')",
-                ("SMS delivery status not reported", row["lead_id"]),
-            )
+            flag_lead_for_review(conn, row["lead_id"], "SMS delivery status not reported")
             enqueue_sheet_update(
                 conn,
                 lead_id=str(row["lead_id"]),
@@ -440,9 +433,8 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
         ).fetchall()
         for row in stuck_notifications:
             if row["lead_id"]:
-                conn.execute(
-                    "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
-                    ("ambiguous confirmation SMS; do not retry", row["lead_id"]),
+                flag_lead_for_review(
+                    conn, row["lead_id"], "ambiguous confirmation SMS; do not retry"
                 )
         stuck_handoffs = conn.execute(
             "update integration_outbox set status='pending',next_attempt_at=now(),last_error=%s,updated_at=now() "
@@ -457,9 +449,8 @@ def run_safety_checks(trace: WorkflowTrace) -> dict[str, int]:
             ("booking did not reach a durable result; reconcile with Stride before retry",),
         ).fetchall()
         for row in stuck_bookings:
-            conn.execute(
-                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
-                ("stale Stride booking requires reconciliation", row["lead_id"]),
+            flag_lead_for_review(
+                conn, row["lead_id"], "stale Stride booking requires reconciliation"
             )
         # A cadence is spent when nothing is left to send and nothing is still
         # out with a provider -- not when the calendar says so. The old rule also
@@ -612,15 +603,13 @@ def run_tick() -> dict[str, int]:
                     "failure_reason=%s where id=%s and status='in_flight'",
                     ("failed" if state in {"failed", "retry"} else "unknown", value[:500], job.event_id),
                 )
-                conn.execute(
-                    "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
-                    (
-                        f"dispatch retries exhausted: {value}"
-                        if exhausted else (
-                            f"ambiguous dispatch: {value}"
-                            if state == "unknown" else f"dispatch failed: {value}"
-                        ),
-                        job.lead_id,
+                flag_lead_for_review(
+                    conn,
+                    job.lead_id,
+                    f"dispatch retries exhausted: {value}"
+                    if exhausted else (
+                        f"ambiguous dispatch: {value}"
+                        if state == "unknown" else f"dispatch failed: {value}"
                     ),
                 )
                 # Migration 025 creates the Sheet outbox row from the terminal

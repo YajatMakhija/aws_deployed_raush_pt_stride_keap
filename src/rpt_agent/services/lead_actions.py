@@ -316,9 +316,12 @@ def _restart_cadence(
     lead_data: dict[str, Any] | None = None,
 ) -> ActionExecution:
     lead = _locked_lead(conn, practice["id"], lead_id, phone)
-    if lead["status"] == "do_not_contact":
+    if lead["status"] in {"booked", "do_not_contact", "invalid_phone"}:
         raise LeadActionError(
-            409, "do_not_contact", "A Do Not Contact lead cannot be restarted", lead_id=str(lead_id)
+            409,
+            "restart_not_allowed",
+            "A booked, Do Not Contact, or invalid-phone lead cannot be restarted",
+            lead_id=str(lead_id),
         )
     if lead["call_opt_out"] and lead["sms_opt_out"]:
         raise LeadActionError(
@@ -338,6 +341,10 @@ def _restart_cadence(
         )
     if lead_data:
         _update_lead_profile(conn, lead_id, lead_data)
+
+    # Restart always creates a fresh run from Day 0, including when the old
+    # cadence was paused. Completed history remains intact; only unfinished
+    # planned/skipped rows are replaced.
     conn.execute(
         "delete from outreach_events where lead_id=%s and status in ('planned','skipped')",
         (lead_id,),
@@ -432,6 +439,52 @@ def _do_not_contact(
     )
 
 
+def _mark_booked(
+    conn,
+    *,
+    request_id: UUID,
+    practice: dict[str, Any],
+    lead_id: UUID,
+    phone: str,
+) -> ActionExecution:
+    """Accept the Sheet team's manual booking decision without inventing an appointment."""
+    lead = _locked_lead(conn, practice["id"], lead_id, phone)
+    if lead["status"] != "booked":
+        conn.execute(
+            "update leads set status='booked',cadence_state='completed',needs_review=false,"
+            "review_reason=null,review_resolved_at=case when needs_review then now() "
+            "else review_resolved_at end,status_reason=%s,status_changed_at=now() where id=%s",
+            ("staff marked Booked in Google Sheets", lead_id),
+        )
+        conn.execute(
+            "update outreach_events set status='skipped',failure_reason=%s,updated_at=now() "
+            "where lead_id=%s and status='planned'",
+            ("Booked selected in Google Sheets", lead_id),
+        )
+        conn.execute(
+            "insert into lead_status_history(lead_id,from_status,to_status,source,reason) "
+            "values(%s,%s,'booked','n8n_sheet','Booked selected in Google Sheets')",
+            (lead_id, lead["status"]),
+        )
+    enqueue_sheet_update(
+        conn,
+        lead_id=str(lead_id),
+        event_type="lead_booked",
+        source_key=str(request_id),
+    )
+    return ActionExecution(
+        200,
+        {
+            "request_id": str(request_id),
+            "lead_id": str(lead_id),
+            "action": "booked",
+            "result": "booked_applied",
+            "created": False,
+            "cadence_event_count": 0,
+        },
+    )
+
+
 def execute_lead_action(
     *,
     request_id: UUID,
@@ -513,6 +566,16 @@ def execute_lead_action(
                     if lead_id is None:
                         raise LeadActionError(422, "lead_id_required", "Lead ID is required")
                     result = _do_not_contact(
+                        conn,
+                        request_id=request_id,
+                        practice=practice,
+                        lead_id=lead_id,
+                        phone=str(lead.get("phone") or ""),
+                    )
+                elif action == "booked":
+                    if lead_id is None:
+                        raise LeadActionError(422, "lead_id_required", "Lead ID is required")
+                    result = _mark_booked(
                         conn,
                         request_id=request_id,
                         practice=practice,

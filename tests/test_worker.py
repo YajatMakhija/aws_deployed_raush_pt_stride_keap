@@ -166,6 +166,7 @@ def test_worker_claims_only_one_due_event_per_lead():
     assert "row_number() over(partition by oe.lead_id" in CLAIM_SQL
     assert "e.lead_order=1" in CLAIM_SQL
     assert "active_event.status in ('in_flight','attempted')" in CLAIM_SQL
+    assert "not l.needs_review" in CLAIM_SQL
 
 
 def test_dispatch_classifies_safe_retry_and_ambiguous_exception():

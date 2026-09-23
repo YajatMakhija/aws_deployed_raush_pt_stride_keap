@@ -29,7 +29,8 @@ The Sheet never talks directly to Supabase, Vapi, or Twilio.
 
 ```text
 Lead ID | Name | Phone Number | Email | Date Of Birth | Location | Title | Action |
-Action Status | Cadence Day | Cadence events | Outcome | Transcript Link | Callback At |
+Action Status | Cadence Day | Cadence events | Call Outcome | Message Outcome | Email Outcome |
+Needs Review | Transcript Link | Callback At |
 Action Request ID | Action Started At
 ```
 
@@ -42,11 +43,14 @@ Action Request ID | Action Started At
 | Date Of Birth | Staff enters `DD/MM/YYYY`; n8n sends `YYYY-MM-DD` | Staff |
 | Location | Location text | Staff |
 | Title | Any non-empty lead type/title | Staff |
-| Action | `Start cadence`, `Restart cadence`, or `Do not contact` | Staff |
+| Action | `Start cadence`, `Restart cadence`, `Do not contact`, or `Booked` | Staff |
 | Action Status | Processing, success, duplicate, review, or error result | n8n |
 | Cadence Day | Most recently completed cadence day, for example `Day 5` | AWS status sync |
 | Cadence events | `Call`, `SMS`, or `Call + SMS` | AWS status sync |
-| Outcome | Call/SMS result | AWS status sync |
+| Call Outcome | Latest call result for the current cadence day | AWS status sync |
+| Message Outcome | Latest SMS result for the current cadence day | AWS status sync |
+| Email Outcome | Reserved for future email outreach; blank today | AWS status sync |
+| Needs Review | Shows `Needs Review` when staff action is required | AWS status sync |
 | Transcript Link | Dashboard calls page for the Lead ID | AWS status sync |
 | Callback At | Readable Pacific time | AWS status sync |
 | Action Request ID | Unique UUID for safe retry/idempotency | n8n |
@@ -61,8 +65,10 @@ plain text.
 - Phone Number detects an existing lead, but it must not be used to choose a Sheet row because duplicate rows
   can have the same phone.
 - n8n uses the trigger's internal `row_number` for the first writes to the exact row. It is not a Sheet column.
-- Later AWS status updates find exactly one row by `Lead ID`.
-- `Action Request ID` makes API retries safe; it does not replace Lead ID.
+- Later AWS status updates find exactly one row by `Action Request ID`. This avoids updating the wrong row
+  when duplicate Sheet rows contain the same phone or Lead ID.
+- `Action Request ID` makes API retries safe and identifies the exact Sheet submission. `Lead ID` still
+  identifies the database lead.
 
 ## 3. Authentication design
 
@@ -204,9 +210,13 @@ payload. n8n verifies the HMAC before reading or updating Google Sheets:
   "occurred_at": "2026-09-20T10:00:00Z",
   "lead_id": "lead-uuid",
   "sheet": {
+    "action_status": "Booked",
     "cadence_day": "Day 0",
     "cadence": "Call + SMS",
-    "cadence_status": "Call: No answer | SMS: Delivered",
+    "call_outcome": "No answer",
+    "message_outcome": "Delivered",
+    "email_outcome": null,
+    "needs_review": "",
     "transcript_link": "https://rpt-frontend-pi.vercel.app/leads/lead-uuid/conversations/calls",
     "callback_at": null
   }
@@ -231,7 +241,7 @@ states and inbound replies. These endpoints update Supabase first; they never ca
 ## 5. Intake workflow
 
 1. Google Sheets Trigger sees an edited row.
-2. Continue only when Action is one of the three supported commands and Action Status is blank. This prevents
+2. Continue only when Action is Start cadence, Restart cadence, Do Not Contact, or Booked and Action Status is blank. This prevents
    the workflow from reprocessing its own Sheet update forever.
 3. Normalize phone and DOB. Accept a one-word Name and any non-empty Title.
 4. Generate one Action Request ID.
@@ -240,7 +250,7 @@ states and inbound replies. These endpoints update Supabase first; they never ca
 6. POST the action to AWS with the intake secret and request UUID.
 7. AWS completes one database transaction.
 8. On success, n8n updates that exact request's row with Lead ID and `Cadence started`, `Cadence restarted`,
-   or `Do not contact applied`.
+   `Do not contact applied`, or `Booked`.
 9. On a permanent error, n8n writes the readable error and stops.
 10. On timeout, 429, or 5xx, n8n leaves recovery information and the recovery workflow retries.
 
@@ -315,7 +325,10 @@ That produces eight `outreach_events`. Days without a configured event create no
 |---|---|
 | `cadence_day` | Cadence Day |
 | `cadence` | Cadence events |
-| `cadence_status` | Outcome |
+| `call_outcome` | Call Outcome |
+| `message_outcome` | Message Outcome |
+| `email_outcome` | Email Outcome (blank until email outreach exists) |
+| `needs_review` | Needs Review |
 | `transcript_link` | Transcript Link |
 | `callback_at` | Callback At |
 | `action_status` when present | Action Status |
@@ -323,6 +336,10 @@ That produces eight `outreach_events`. Days without a configured event create no
 Action Status is normally owned by intake/recovery. The status webhook may change it only for later system
 outcomes such as `Cadence completed` or `Do not contact applied`. It must not replace `Cadence started` on
 every callback.
+
+The team-owned Booked action completes the cadence. A declined call terminates it. Wrong-number/person results
+and failed or undelivered cadence SMS mark Needs Review and pause it. Booking-link-sent and transferred-call
+outcomes are reported but do not stop later cadence steps.
 
 Callback At is stored as an exact timestamp in Supabase and displayed as readable Pacific time, for example
 `Sep 21, 2026 at 9:00 AM PT`.
@@ -430,7 +447,8 @@ Also configure the existing Vapi/Twilio credentials and callback URLs. Recreate 
 
 1. Review and merge only intended branch changes; do not commit `.env` or exported workflows containing
    secrets.
-2. Apply migrations 023 through 026 and confirm migration status.
+2. Apply migrations 023 through 029 in filename order and confirm migration status. Migrations 027-029 add
+   the booking-link call outcome, review-pause fail-safe, and durable `Booked` Sheet action compatibility.
 3. Confirm both n8n directions use the production HMAC keys and secrets.
 4. Complete the remaining active n8n workflow corrections in section 12.
 5. Set `TEST_MODE=false` and `N8N_INTAKE_AUTH_DISABLED=false`.
@@ -444,7 +462,8 @@ Also configure the existing Vapi/Twilio credentials and callback URLs. Recreate 
     - Eight outreach events are created for the configured cadence.
     - One Day 0 call and SMS dispatch.
     - Vapi/Twilio callbacks settle the correct events.
-    - Cadence Day, Cadence events, Outcome, Transcript Link, and Callback At update by Lead ID.
+    - Cadence Day, Cadence events, separate outcomes, Needs Review, Transcript Link, and Callback At update
+      on the row identified by Action Request ID.
 11. Test duplicate phone, changed phone, name edit, lost intake response, failed SMS, duplicate callback, wrong
     secret, and unavailable n8n.
 12. Monitor `provider_events`, `integration_events`, `integration_outbox`, worker logs, and dead-letter rows
@@ -452,7 +471,7 @@ Also configure the existing Vapi/Twilio credentials and callback URLs. Recreate 
 
 ## 16. Current verification status
 
-- Backend tests: `142 passed, 3 skipped`.
+- Backend tests: `180 passed, 3 skipped`.
 - Ruff: passed.
 - Production Compose configuration: passed.
 - Database migrations 023, 025, and 026 were applied to the configured Supabase; migration 024 was already

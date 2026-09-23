@@ -10,6 +10,7 @@ from ..retry import retry_delay_seconds
 from ..usage_report import record_test_usage
 from ..vapi_contract import extract_vapi_context, outcome_from_ended_reason
 from .lead_status import apply_call_outcome
+from .review import flag_lead_for_review
 from .sheet_sync import dashboard_call_link, enqueue_sheet_update
 
 # The patient's last word on the call wins. A booking link waits two minutes
@@ -168,16 +169,13 @@ def process_pending_integrations(
                     "update notification_log set status=%s,error=%s,updated_at=now() where id=%s",
                     (status, str(exc)[:500], row["id"]),
                 )
-                conn.execute(
-                    "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
-                    "where id=%s",
-                    (
-                        "ambiguous SMS notification; reconcile before retry"
-                        if exc.ambiguous else (
-                            "SMS notification retries exhausted"
-                            if exc.retryable else "booking link text could not be delivered"
-                        ),
-                        row["lead_id"],
+                flag_lead_for_review(
+                    conn,
+                    row["lead_id"],
+                    "ambiguous SMS notification; reconcile before retry"
+                    if exc.ambiguous else (
+                        "SMS notification retries exhausted"
+                        if exc.retryable else "booking link text could not be delivered"
                     ),
                 )
             counts["failed"] += 1
@@ -193,10 +191,8 @@ def process_pending_integrations(
                     "update notification_log set status='unknown',error=%s,updated_at=now() where id=%s",
                     (f"unexpected delivery error: {type(exc).__name__}", row["id"]),
                 )
-                conn.execute(
-                    "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
-                    "where id=%s",
-                    ("SMS notification delivery requires review", row["lead_id"]),
+                flag_lead_for_review(
+                    conn, row["lead_id"], "SMS notification delivery requires review"
                 )
             counts["failed"] += 1
     for row in outbox:
@@ -320,10 +316,8 @@ def _settle_from_structured_output(
                 "where id=%s and status in ('in_flight','attempted')",
                 ("call was answered but no outcome was reported", event_id),
             )
-            conn.execute(
-                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
-                "where id=%s and needs_review is not true",
-                ("call answered but no outcome reported; see transcript", lead_id),
+            flag_lead_for_review(
+                conn, lead_id, "call answered but no outcome reported; see transcript"
             )
         trace.log("state_transition_applied", transition="fallback_review", event_id=event_id)
         return "manual"
@@ -342,10 +336,8 @@ def _settle_from_structured_output(
         )
     except (TypeError, ValueError) as exc:
         with transaction() as conn:
-            conn.execute(
-                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
-                "where id=%s",
-                (f"structured outcome could not be applied: {exc}"[:500], lead_id),
+            flag_lead_for_review(
+                conn, lead_id, f"structured outcome could not be applied: {exc}"
             )
         trace.log("validation_failed", reason="structured_output_rejected")
         return None
@@ -584,6 +576,12 @@ def apply_twilio_message_status(conn, form_data: dict[str, str]) -> int:
             ),
         ).fetchone()
         if event:
+            if actual_status in {"failed", "undelivered"}:
+                flag_lead_for_review(
+                    conn,
+                    str(event["lead_id"]),
+                    "cadence SMS was not delivered",
+                )
             enqueue_sheet_update(
                 conn,
                 lead_id=str(event["lead_id"]),
