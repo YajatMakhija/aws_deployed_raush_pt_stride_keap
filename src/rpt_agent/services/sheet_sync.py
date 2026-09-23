@@ -232,6 +232,12 @@ def build_sheet_snapshot(
     action_status = _action_label(lead)
     if action_status is not None:
         sheet["action_status"] = action_status
+    # Booked ends the lead however it happened (board, Sheet or call), so the
+    # Action cell must stop showing the last command staff picked - "Restart
+    # cadence" next to "Booked" reads as a pending instruction. Other states
+    # omit the key so n8n leaves the cell as staff set it.
+    if lead["status"] == "booked":
+        sheet["action"] = "Booked"
 
     return {
         "lead_id": str(lead["id"]),

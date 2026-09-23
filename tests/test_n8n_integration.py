@@ -484,6 +484,24 @@ def test_callback_call_reaches_the_sheet():
     assert snapshot["sheet"]["call_outcome"] == "Answered - declined"
 
 
+class _BookedSnapshotConnection(_SnapshotConnection):
+    def execute(self, query, params=None):
+        rows = super().execute(query, params)
+        if query.startswith("select l.id,l.status"):
+            rows.one = {**rows.one, "status": "booked", "cadence_state": "completed"}
+        return rows
+
+
+def test_booked_lead_sets_the_action_cell_too():
+    """The Action cell kept the last command ("Restart cadence") next to a
+    Booked status, which reads as an instruction still waiting to run."""
+    booked = build_sheet_snapshot(_BookedSnapshotConnection(), "00000000-0000-0000-0000-000000000002")
+    assert booked["sheet"]["action"] == "Booked"
+    assert booked["sheet"]["action_status"] == "Booked"
+    active = build_sheet_snapshot(_SnapshotConnection(), "00000000-0000-0000-0000-000000000002")
+    assert "action" not in active["sheet"]
+
+
 def test_sheet_snapshot_uses_lead_id_and_current_database_truth():
     snapshot = build_sheet_snapshot(
         _SnapshotConnection(),
