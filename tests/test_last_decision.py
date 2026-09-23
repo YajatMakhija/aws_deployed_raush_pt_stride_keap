@@ -56,6 +56,23 @@ def test_booking_link_waits_and_is_one_per_call():
     assert "payload->>'call_id'" in source, "asking again must re-arm this call's text, not add one"
 
 
+def test_booking_link_and_transfer_continue_but_decline_stops_cadence():
+    report_source = inspect.getsource(lead_status.report_lead_status)
+    apply_source = inspect.getsource(lead_status.apply_call_outcome)
+    assert "status='booking_link_sent',cadence_state='active'" in report_source
+    assert "status='transferred_human',cadence_state='active'" in report_source
+    assert "status='transferred_human',cadence_state='active'" in apply_source
+    assert "status='declined',cadence_state='terminated'" in report_source
+    assert "status='declined',cadence_state='terminated'" in apply_source
+
+
+def test_wrong_person_pauses_as_invalid_phone_for_review():
+    source = inspect.getsource(lead_status.report_lead_status)
+    assert 'normalized == "wrong_person"' in source
+    assert "status='invalid_phone',cadence_state='paused'" in source
+    assert "needs_review=true" in source
+
+
 def test_a_changed_decision_stops_the_waiting_link():
     sql = " ".join(delivery.CANCEL_CHANGED_BOOKING_LINK_SQL.split())
     assert "n.status='queued'" in sql and "sms_booking_link" in sql

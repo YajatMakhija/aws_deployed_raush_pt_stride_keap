@@ -23,6 +23,7 @@ from rpt_agent.services.sheet_sync import (
     build_sheet_snapshot,
     dashboard_call_link,
     enqueue_sheet_update,
+    format_cadence_columns,
     format_cadence_result,
     format_callback_time,
 )
@@ -363,7 +364,23 @@ def test_sheet_result_combines_call_and_sms():
         lead,
     )
     assert event_label == "Call + SMS"
-    assert outcome == "Call: No answer | SMS: Delivered"
+    assert outcome == "Call: No answer, SMS: Delivered"
+
+
+def test_sheet_result_has_separate_outcome_columns():
+    cadence, call, message, email = format_cadence_columns(
+        [
+            {"channel": "call", "status": "delivered", "outcome": "transferred"},
+            {"channel": "sms", "status": "failed", "delivery_status": "undelivered"},
+        ],
+        {"status": "transferred_human", "cadence_state": "paused"},
+    )
+    assert (cadence, call, message, email) == (
+        "Call + SMS",
+        "Call transferred",
+        "Failed",
+        None,
+    )
 
 
 def test_sheet_result_marks_missing_sms_callback_for_review():
@@ -383,6 +400,7 @@ def test_sheet_action_status_only_for_system_outcomes():
     assert _action_label({"status": "closed_no_response", "cadence_state": "completed"}) == (
         "Cadence completed"
     )
+    assert _action_label({"status": "booked", "cadence_state": "completed"}) == "Booked"
 
 
 class _Rows:
@@ -405,6 +423,7 @@ class _SnapshotConnection:
                 "id": UUID("00000000-0000-0000-0000-000000000002"),
                 "status": "callback_scheduled",
                 "cadence_state": "active",
+                "needs_review": True,
                 "callback_requested_at": datetime(2026, 9, 20, 18, 0, tzinfo=UTC),
                 "timezone": "America/Los_Angeles",
             })
@@ -444,6 +463,10 @@ def test_sheet_snapshot_uses_lead_id_and_current_database_truth():
     assert snapshot["sheet"]["cadence_day"] == "Day 0"
     assert snapshot["sheet"]["cadence"] == "Call"
     assert snapshot["sheet"]["cadence_status"] == "Callback requested"
+    assert snapshot["sheet"]["call_outcome"] == "Callback requested"
+    assert snapshot["sheet"]["message_outcome"] is None
+    assert snapshot["sheet"]["email_outcome"] is None
+    assert snapshot["sheet"]["needs_review"] == "Needs Review"
     assert snapshot["sheet"]["callback_at"] == "Sep 20, 2026 at 11:00 AM PT"
 
 
@@ -609,6 +632,44 @@ def test_start_cadence_rejects_duplicate_phone_without_writing(monkeypatch):
     assert not any(query.startswith("update leads") for query in conn.queries)
 
 
+def test_sheet_team_can_mark_booked_without_an_appointment():
+    lead_id = UUID("00000000-0000-0000-0000-000000000002")
+
+    class Connection:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, params=None):
+            normalized = " ".join(query.split())
+            self.queries.append((normalized, params))
+            if normalized.startswith("select id,practice_id,status"):
+                return _Rows(one={
+                    "id": lead_id,
+                    "practice_id": 1,
+                    "status": "in_progress",
+                    "cadence_state": "active",
+                    "call_opt_out": False,
+                    "sms_opt_out": False,
+                    "phone_e164": "+15555550100",
+                })
+            return _Rows()
+
+    conn = Connection()
+    result = lead_actions._mark_booked(
+        conn,
+        request_id=UUID("00000000-0000-0000-0000-000000000001"),
+        practice={"id": 1},
+        lead_id=lead_id,
+        phone="+15555550100",
+    )
+
+    assert result.body["result"] == "booked_applied"
+    statements = [query for query, _ in conn.queries]
+    assert any("status='booked',cadence_state='completed'" in query for query in statements)
+    assert any("status='skipped'" in query for query in statements)
+    assert not any("from appointments" in query for query in statements)
+
+
 def test_sheet_webhook_uses_separate_hmac_secret(monkeypatch):
     monkeypatch.setenv("N8N_SHEET_KEY_ID", "aws-sheet-worker")
     monkeypatch.setenv("N8N_SHEET_WEBHOOK_SECRET", "outbound-secret-that-is-long-enough")
@@ -669,6 +730,11 @@ def test_migration_and_worker_routing_contracts():
     )
     assert "drop constraint if exists leads_lead_type_check" in free_text_sql
     assert "create index" not in free_text_sql.lower()
+    review_sql = Path("supabase/migrations/028_pause_failed_outreach_for_review.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "new.status in ('failed', 'unknown')" in review_sql
+    assert "cadence_state = 'paused'" in review_sql
 
     from rpt_agent.services import delivery
 

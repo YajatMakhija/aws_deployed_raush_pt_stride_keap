@@ -359,33 +359,22 @@ def report_lead_status(
                     "next_attempt_at=now()+interval '2 minutes',updated_at=now() where id=%s",
                     (existing["id"],),
                 )
-            # Sending the link is the end of our outreach: we cannot tell whether the
-            # patient booked until Stride is re-enabled, so we stop chasing them.
+            # A booking link is an outcome, not proof of a booking. Keep the
+            # remaining cadence active until staff explicitly marks the lead booked.
             conn.execute(
-                "update leads set status='booking_link_sent',cadence_state='completed',"
+                "update leads set status='booking_link_sent',cadence_state='active',"
                 "last_call_outcome='manual',status_reason=%s,status_changed_at=now() where id=%s",
                 (note or "booking link requested", lead_id),
-            )
-            conn.execute(
-                "update outreach_events set status='skipped',updated_at=now() "
-                "where lead_id=%s and status='planned'",
-                (lead_id,),
             )
             record_status(
                 conn, lead_id, lead["status"], "booking_link_sent", source, note or "booking link requested"
             )
         elif normalized == "transferred_human":
-            # A person has taken over the conversation, so automated outreach is done.
-            # Matches apply_call_outcome(), which already completes on transfer.
+            # Record the handoff, but only an explicit staff booking closes cadence.
             conn.execute(
-                "update leads set status='transferred_human',cadence_state='completed',"
+                "update leads set status='transferred_human',cadence_state='active',"
                 "last_call_outcome='transferred',status_reason=%s,status_changed_at=now() where id=%s",
                 (note or "transferred to staff", lead_id),
-            )
-            conn.execute(
-                "update outreach_events set status='skipped',updated_at=now() "
-                "where lead_id=%s and status='planned'",
-                (lead_id,),
             )
             record_status(
                 conn, lead_id, lead["status"], "transferred_human", source, note or "transferred"
@@ -395,6 +384,15 @@ def report_lead_status(
                 "update leads set last_call_outcome='no_answer',status_reason=%s where id=%s",
                 (note or None, lead_id),
             )
+        elif normalized == "wrong_person":
+            reason = note or "wrong phone number"
+            conn.execute(
+                "update leads set status='invalid_phone',cadence_state='paused',"
+                "last_call_outcome='manual',needs_review=true,review_reason=%s,"
+                "review_flagged_at=now(),status_changed_at=now() where id=%s",
+                (reason, lead_id),
+            )
+            record_status(conn, lead_id, lead["status"], "invalid_phone", source, reason)
         elif normalized == "call_opt_out":
             conn.execute(
                 "update leads set call_opt_out=true,last_call_outcome='call_opt_out',"
@@ -430,9 +428,7 @@ def report_lead_status(
                 conn, lead_id, lead["status"], "do_not_contact", source, note or "do not contact"
             )
         else:
-            reason = note or (
-                "wrong person reached" if normalized == "wrong_person" else f"unrecognized status: {normalized}"
-            )
+            reason = note or f"unrecognized status: {normalized}"
             conn.execute(
                 "update leads set status='needs_attention',cadence_state='paused',"
                 "last_call_outcome='manual',needs_review=true,review_reason=%s,"
@@ -540,12 +536,8 @@ def apply_call_outcome(
             conn.execute("update leads set last_call_outcome=%s where id=%s", (outcome, lead_id))
         elif outcome == "transferred":
             conn.execute(
-                "update leads set status='transferred_human',cadence_state='completed',last_call_outcome=%s,"
+                "update leads set status='transferred_human',cadence_state='active',last_call_outcome=%s,"
                 "status_changed_at=now() where id=%s", (outcome, lead_id),
-            )
-            conn.execute(
-                "update outreach_events set status='skipped',updated_at=now() "
-                "where lead_id=%s and status='planned'", (lead_id,),
             )
             record_status(conn, lead_id, lead["status"], "transferred_human", source, outcome)
         elif outcome == "call_opt_out":

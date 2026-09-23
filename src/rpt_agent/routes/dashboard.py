@@ -15,6 +15,7 @@ from ..observability import WorkflowTrace
 from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
 from ..services.provider_http import ProviderError
+from ..services.review import flag_lead_for_review
 from ..services.twilio_service import TwilioService
 from ..worker import format_phone, materialize_cadence
 
@@ -170,8 +171,6 @@ class LeadCreate(BaseModel):
 CLOSED_STATUSES = frozenset(
     {
         "declined",
-        "transferred_human",
-        "booking_link_sent",
         "do_not_contact",
         "closed_no_response",
         "invalid_phone",
@@ -186,7 +185,7 @@ def _stage(row: dict) -> str:
     if row["needs_review"] or row["status"] == "needs_attention":
         return "attention"
     # A finished lead is not in cadence. Without this it falls through below and
-    # a declined or transferred patient keeps showing as actively worked.
+    # a declined patient keeps showing as actively worked.
     if row["status"] in CLOSED_STATUSES or row["cadence_state"] in {"completed", "terminated"}:
         return "closed"
     if row["status"] == "new" or row["cadence_state"] == "pending":
@@ -1823,9 +1822,8 @@ def send_manual_sms(
                 (status, exc.code, request_id),
             )
             if status == "unknown":
-                conn.execute(
-                    "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() where id=%s",
-                    ("manual SMS result requires provider reconciliation", lead_id),
+                flag_lead_for_review(
+                    conn, str(lead_id), "manual SMS result requires provider reconciliation"
                 )
             _audit(
                 conn, actor, lead["practice_id"], f"sms.manual_{status}", "lead", str(lead_id),

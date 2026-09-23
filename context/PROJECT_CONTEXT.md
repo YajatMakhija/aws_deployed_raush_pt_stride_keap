@@ -906,6 +906,19 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   `105 passed, 3 skipped` and Ruff passed; frontend ESLint, TypeScript, and Vinext production build passed after
   restoring `node_modules` with `npm ci`. Node 26 produced the expected engine warning because the project
   declares Node 22.x.
+### 2026-09-23 - Sheet Outcome uses comma instead of pipe
+
+- Combined Call+SMS Outcome (`cadence_status`) now formats as `Call: No answer, SMS: Delivered`
+  instead of `Call: No answer | SMS: Delivered`.
+
+### 2026-09-23 - Separate Sheet outcomes and review-pausing rules
+
+- Added separate Sheet snapshot fields for Call Outcome, Message Outcome, Email Outcome, and Needs Review.
+- Added the team-owned Sheet `Booked` action. Booked and declined stop cadence; wrong-number/person outcomes
+  and failed/undelivered SMS pause cadence for review. Booking links and call transfers no longer stop cadence.
+- Added unapplied migration 028 as a database fail-safe so terminal outreach failures pause the lead for review.
+- Focused backend validation passed: `42 passed`. n8n must accept/map the new fields before this backend is deployed.
+
 ### 2026-09-20 - Day 0 SMS Sheet trace
 
 - Read-only tracing confirmed the latest Google-Sheets test lead's Day 0 SMS was attempted but Twilio rejected

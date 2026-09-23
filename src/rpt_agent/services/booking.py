@@ -14,6 +14,7 @@ from ..observability import WorkflowTrace
 from ..providers import ProviderClients, ProviderError
 from ..security import sign_slot, verify_slot
 from .lead_status import mark_booked
+from .review import flag_lead_for_review
 
 
 class BookingService:
@@ -527,8 +528,4 @@ class BookingService:
     @staticmethod
     def _flag_review(lead_id: str, reason: str) -> None:
         with transaction() as conn:
-            conn.execute(
-                "update leads set needs_review=true,review_reason=%s,review_flagged_at=now() "
-                "where id=%s",
-                (reason, lead_id),
-            )
+            flag_lead_for_review(conn, lead_id, reason)

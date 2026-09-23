@@ -16,6 +16,7 @@ CALL_OUTCOME_LABELS = {
     "voicemail": "Voicemail left",
     "callback": "Callback requested",
     "transferred": "Call transferred",
+    "booking_link": "Booking link sent",
     "call_opt_out": "Do not contact",
     "do_not_contact": "Do not contact",
     "manual": "Needs staff review",
@@ -77,6 +78,8 @@ def _action_label(lead: dict[str, Any]) -> str | None:
     like the status webhook owned start/Lead ID. Only emit labels that outreach can
     set after the fact (completed cadence, voice/tool DNC).
     """
+    if lead["status"] == "booked":
+        return "Booked"
     if lead["status"] == "do_not_contact":
         return "Do not contact applied"
     if lead["cadence_state"] == "completed":
@@ -87,8 +90,6 @@ def _action_label(lead: dict[str, Any]) -> str | None:
 def _call_label(event: dict[str, Any], lead: dict[str, Any]) -> str:
     if lead["status"] == "invalid_phone":
         return "Wrong number"
-    if lead["status"] == "booking_link_sent":
-        return "Booking link sent"
     if event.get("status") in {"failed", "unknown"}:
         return "Failed" if event["status"] == "failed" else "Needs staff review"
     return CALL_OUTCOME_LABELS.get(event.get("outcome"), "Needs staff review")
@@ -106,21 +107,34 @@ def format_cadence_result(
     events: list[dict[str, Any]], lead: dict[str, Any]
 ) -> tuple[str | None, str | None]:
     """Return the human Sheet labels for one cadence day."""
+    event_label, call_outcome, message_outcome, _ = format_cadence_columns(events, lead)
+    labels = [
+        ("Call", call_outcome),
+        ("SMS", message_outcome),
+    ]
+    populated = [(channel, label) for channel, label in labels if label is not None]
+    if not populated:
+        return event_label, None
+    if len(populated) == 1:
+        return event_label, populated[0][1]
+    return event_label, ", ".join(f"{channel}: {label}" for channel, label in populated)
+
+
+def format_cadence_columns(
+    events: list[dict[str, Any]], lead: dict[str, Any]
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Return separate Sheet outcomes while email outreach remains unsupported."""
     latest_by_channel: dict[str, dict[str, Any]] = {}
     for event in events:
         latest_by_channel[event["channel"]] = event
-    labels: list[tuple[str, str]] = []
-    if call := latest_by_channel.get("call"):
-        labels.append(("Call", _call_label(call, lead)))
-    if sms := latest_by_channel.get("sms"):
-        labels.append(("SMS", _sms_label(sms)))
-    if not labels:
-        return None, None
-    event_label = " + ".join(channel for channel, _ in labels)
-    if len(labels) == 1:
-        return event_label, labels[0][1]
-    outcome = " | ".join(f"{channel}: {label}" for channel, label in labels)
-    return event_label, outcome
+    call_outcome = _call_label(call, lead) if (call := latest_by_channel.get("call")) else None
+    message_outcome = _sms_label(sms) if (sms := latest_by_channel.get("sms")) else None
+    channels = [
+        channel
+        for channel, outcome in (("Call", call_outcome), ("SMS", message_outcome))
+        if outcome is not None
+    ]
+    return " + ".join(channels) or None, call_outcome, message_outcome, None
 
 
 def build_sheet_snapshot(
@@ -128,7 +142,7 @@ def build_sheet_snapshot(
 ) -> dict[str, Any]:
     """Build the current Sheet view from committed database truth."""
     lead = conn.execute(
-        "select l.id,l.status,l.cadence_state,l.callback_requested_at,"
+        "select l.id,l.status,l.cadence_state,l.needs_review,l.callback_requested_at,"
         "coalesce(l.timezone,p.timezone,'America/Los_Angeles') as timezone "
         "from leads l join practices p on p.id=l.practice_id where l.id=%s "
         "and (%s::text is null or p.slug=%s::text)",
@@ -185,7 +199,8 @@ def build_sheet_snapshot(
         ).fetchall()
         cadence_day = f"Day {int(latest['day_offset'])}"
 
-    cadence, cadence_status = format_cadence_result(events, lead)
+    cadence, call_outcome, message_outcome, email_outcome = format_cadence_columns(events, lead)
+    _, cadence_status = format_cadence_result(events, lead)
     callback_at: str | None = None
     if isinstance(lead.get("callback_requested_at"), datetime):
         callback_at = format_callback_time(
@@ -197,6 +212,10 @@ def build_sheet_snapshot(
         "cadence_day": cadence_day,
         "cadence": cadence,
         "cadence_status": cadence_status,
+        "call_outcome": call_outcome,
+        "message_outcome": message_outcome,
+        "email_outcome": email_outcome,
+        "needs_review": "Needs Review" if lead["needs_review"] else "",
         "transcript_link": dashboard_call_link(str(lead["id"])),
         "callback_at": callback_at,
     }

@@ -204,9 +204,13 @@ payload. n8n verifies the HMAC before reading or updating Google Sheets:
   "occurred_at": "2026-09-20T10:00:00Z",
   "lead_id": "lead-uuid",
   "sheet": {
+    "action_status": "Booked",
     "cadence_day": "Day 0",
     "cadence": "Call + SMS",
-    "cadence_status": "Call: No answer | SMS: Delivered",
+    "call_outcome": "No answer",
+    "message_outcome": "Delivered",
+    "email_outcome": null,
+    "needs_review": "",
     "transcript_link": "https://rpt-frontend-pi.vercel.app/leads/lead-uuid/conversations/calls",
     "callback_at": null
   }
@@ -231,7 +235,7 @@ states and inbound replies. These endpoints update Supabase first; they never ca
 ## 5. Intake workflow
 
 1. Google Sheets Trigger sees an edited row.
-2. Continue only when Action is one of the three supported commands and Action Status is blank. This prevents
+2. Continue only when Action is Start cadence, Restart cadence, Do Not Contact, or Booked and Action Status is blank. This prevents
    the workflow from reprocessing its own Sheet update forever.
 3. Normalize phone and DOB. Accept a one-word Name and any non-empty Title.
 4. Generate one Action Request ID.
@@ -240,7 +244,7 @@ states and inbound replies. These endpoints update Supabase first; they never ca
 6. POST the action to AWS with the intake secret and request UUID.
 7. AWS completes one database transaction.
 8. On success, n8n updates that exact request's row with Lead ID and `Cadence started`, `Cadence restarted`,
-   or `Do not contact applied`.
+   `Do not contact applied`, or `Booked`.
 9. On a permanent error, n8n writes the readable error and stops.
 10. On timeout, 429, or 5xx, n8n leaves recovery information and the recovery workflow retries.
 
@@ -315,7 +319,10 @@ That produces eight `outreach_events`. Days without a configured event create no
 |---|---|
 | `cadence_day` | Cadence Day |
 | `cadence` | Cadence events |
-| `cadence_status` | Outcome |
+| `call_outcome` | Call Outcome |
+| `message_outcome` | Message Outcome |
+| `email_outcome` | Email Outcome (blank until email outreach exists) |
+| `needs_review` | Needs Review |
 | `transcript_link` | Transcript Link |
 | `callback_at` | Callback At |
 | `action_status` when present | Action Status |
@@ -323,6 +330,10 @@ That produces eight `outreach_events`. Days without a configured event create no
 Action Status is normally owned by intake/recovery. The status webhook may change it only for later system
 outcomes such as `Cadence completed` or `Do not contact applied`. It must not replace `Cadence started` on
 every callback.
+
+The team-owned Booked action completes the cadence. A declined call terminates it. Wrong-number/person results
+and failed or undelivered cadence SMS mark Needs Review and pause it. Booking-link-sent and transferred-call
+outcomes are reported but do not stop later cadence steps.
 
 Callback At is stored as an exact timestamp in Supabase and displayed as readable Pacific time, for example
 `Sep 21, 2026 at 9:00 AM PT`.
