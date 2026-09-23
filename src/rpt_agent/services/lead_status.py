@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from ..db import transaction
 from ..observability import WorkflowTrace
+from .review import skip_remaining_planned
 from .sheet_sync import enqueue_sheet_update
 
 CALLBACK_MIN_MINUTES = 5
@@ -260,6 +261,7 @@ def report_lead_status(
             "call_opt_out": "call_opt_out",
             "do_not_contact": "do_not_contact",
             "booking_link_sent": "booking_link",
+            "booking_link": "booking_link",
         }.get(normalized, "manual")
         if event:
             conn.execute(
@@ -392,6 +394,7 @@ def report_lead_status(
                 "review_flagged_at=now(),status_changed_at=now() where id=%s",
                 (reason, lead_id),
             )
+            skip_remaining_planned(conn, lead_id)
             record_status(conn, lead_id, lead["status"], "invalid_phone", source, reason)
         elif normalized == "call_opt_out":
             conn.execute(
@@ -435,6 +438,7 @@ def report_lead_status(
                 "review_flagged_at=now(),status_changed_at=now() where id=%s",
                 (reason, lead_id),
             )
+            skip_remaining_planned(conn, lead_id)
             record_status(conn, lead_id, lead["status"], "needs_attention", source, reason)
         conn.execute("update provider_events set processed_at=now() where id=%s", (receipt["id"],))
         enqueue_sheet_update(
@@ -578,6 +582,7 @@ def apply_call_outcome(
                 "where id=%s",
                 (outcome, f"call outcome: {outcome}", lead_id),
             )
+            skip_remaining_planned(conn, lead_id)
             record_status(conn, lead_id, lead["status"], "needs_attention", source, outcome)
         if event["vapi_call_id"]:
             conn.execute(

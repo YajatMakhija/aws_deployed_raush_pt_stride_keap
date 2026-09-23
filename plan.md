@@ -29,7 +29,8 @@ The Sheet never talks directly to Supabase, Vapi, or Twilio.
 
 ```text
 Lead ID | Name | Phone Number | Email | Date Of Birth | Location | Title | Action |
-Action Status | Cadence Day | Cadence events | Outcome | Transcript Link | Callback At |
+Action Status | Cadence Day | Cadence events | Call Outcome | Message Outcome | Email Outcome |
+Needs Review | Transcript Link | Callback At |
 Action Request ID | Action Started At
 ```
 
@@ -42,11 +43,14 @@ Action Request ID | Action Started At
 | Date Of Birth | Staff enters `DD/MM/YYYY`; n8n sends `YYYY-MM-DD` | Staff |
 | Location | Location text | Staff |
 | Title | Any non-empty lead type/title | Staff |
-| Action | `Start cadence`, `Restart cadence`, or `Do not contact` | Staff |
+| Action | `Start cadence`, `Restart cadence`, `Do not contact`, or `Booked` | Staff |
 | Action Status | Processing, success, duplicate, review, or error result | n8n |
 | Cadence Day | Most recently completed cadence day, for example `Day 5` | AWS status sync |
 | Cadence events | `Call`, `SMS`, or `Call + SMS` | AWS status sync |
-| Outcome | Call/SMS result | AWS status sync |
+| Call Outcome | Latest call result for the current cadence day | AWS status sync |
+| Message Outcome | Latest SMS result for the current cadence day | AWS status sync |
+| Email Outcome | Reserved for future email outreach; blank today | AWS status sync |
+| Needs Review | Shows `Needs Review` when staff action is required | AWS status sync |
 | Transcript Link | Dashboard calls page for the Lead ID | AWS status sync |
 | Callback At | Readable Pacific time | AWS status sync |
 | Action Request ID | Unique UUID for safe retry/idempotency | n8n |
@@ -61,8 +65,10 @@ plain text.
 - Phone Number detects an existing lead, but it must not be used to choose a Sheet row because duplicate rows
   can have the same phone.
 - n8n uses the trigger's internal `row_number` for the first writes to the exact row. It is not a Sheet column.
-- Later AWS status updates find exactly one row by `Lead ID`.
-- `Action Request ID` makes API retries safe; it does not replace Lead ID.
+- Later AWS status updates find exactly one row by `Action Request ID`. This avoids updating the wrong row
+  when duplicate Sheet rows contain the same phone or Lead ID.
+- `Action Request ID` makes API retries safe and identifies the exact Sheet submission. `Lead ID` still
+  identifies the database lead.
 
 ## 3. Authentication design
 
@@ -441,7 +447,8 @@ Also configure the existing Vapi/Twilio credentials and callback URLs. Recreate 
 
 1. Review and merge only intended branch changes; do not commit `.env` or exported workflows containing
    secrets.
-2. Apply migrations 023 through 026 and confirm migration status.
+2. Apply migrations 023 through 029 in filename order and confirm migration status. Migrations 027-029 add
+   the booking-link call outcome, review-pause fail-safe, and durable `Booked` Sheet action compatibility.
 3. Confirm both n8n directions use the production HMAC keys and secrets.
 4. Complete the remaining active n8n workflow corrections in section 12.
 5. Set `TEST_MODE=false` and `N8N_INTAKE_AUTH_DISABLED=false`.
@@ -455,7 +462,8 @@ Also configure the existing Vapi/Twilio credentials and callback URLs. Recreate 
     - Eight outreach events are created for the configured cadence.
     - One Day 0 call and SMS dispatch.
     - Vapi/Twilio callbacks settle the correct events.
-    - Cadence Day, Cadence events, Outcome, Transcript Link, and Callback At update by Lead ID.
+    - Cadence Day, Cadence events, separate outcomes, Needs Review, Transcript Link, and Callback At update
+      on the row identified by Action Request ID.
 11. Test duplicate phone, changed phone, name edit, lost intake response, failed SMS, duplicate callback, wrong
     secret, and unavailable n8n.
 12. Monitor `provider_events`, `integration_events`, `integration_outbox`, worker logs, and dead-letter rows
@@ -463,7 +471,7 @@ Also configure the existing Vapi/Twilio credentials and callback URLs. Recreate 
 
 ## 16. Current verification status
 
-- Backend tests: `142 passed, 3 skipped`.
+- Backend tests: `180 passed, 3 skipped`.
 - Ruff: passed.
 - Production Compose configuration: passed.
 - Database migrations 023, 025, and 026 were applied to the configured Supabase; migration 024 was already

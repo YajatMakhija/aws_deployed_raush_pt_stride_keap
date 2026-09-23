@@ -100,7 +100,7 @@ def _sms_label(event: dict[str, Any]) -> str:
         return "Delivered"
     if event.get("status") == "unknown":
         return "Needs staff review"
-    return "Failed"
+    return "Not delivered"
 
 
 def format_cadence_result(
@@ -151,6 +151,13 @@ def build_sheet_snapshot(
     if not lead:
         raise LookupError("lead not found")
 
+    sheet_action = conn.execute(
+        "select request_id from lead_action_requests where lead_id=%s and status='completed' "
+        "order by completed_at desc nulls last,created_at desc limit 1",
+        (lead_id,),
+    ).fetchone()
+    action_request_id = str(sheet_action["request_id"]) if sheet_action else None
+
     run_action = conn.execute(
         "select request_id,created_at,"
         "coalesce(response_body#>>'{body,result}',response_body->>'result') as result "
@@ -160,7 +167,6 @@ def build_sheet_snapshot(
         "order by completed_at desc nulls last,created_at desc limit 1",
         (lead_id,),
     ).fetchone()
-    action_request_id = str(run_action["request_id"]) if run_action else None
     run_started_at = (
         run_action["created_at"]
         if run_action and run_action["result"] != "already_started"

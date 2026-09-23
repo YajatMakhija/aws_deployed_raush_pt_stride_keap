@@ -64,6 +64,7 @@ def test_booking_link_and_transfer_continue_but_decline_stops_cadence():
     assert "status='transferred_human',cadence_state='active'" in apply_source
     assert "status='declined',cadence_state='terminated'" in report_source
     assert "status='declined',cadence_state='terminated'" in apply_source
+    assert '"booking_link": "booking_link"' in report_source
 
 
 def test_wrong_person_pauses_as_invalid_phone_for_review():
@@ -71,6 +72,37 @@ def test_wrong_person_pauses_as_invalid_phone_for_review():
     assert 'normalized == "wrong_person"' in source
     assert "status='invalid_phone',cadence_state='paused'" in source
     assert "needs_review=true" in source
+    assert "skip_remaining_planned" in source
+
+
+def test_sheet_sms_failure_outcome_is_not_delivered():
+    from rpt_agent.services.sheet_sync import format_cadence_result
+
+    _label, outcome = format_cadence_result(
+        [{"channel": "sms", "status": "failed", "delivery_status": "failed"}],
+        {"status": "needs_attention", "cadence_state": "paused"},
+    )
+    assert outcome == "Not delivered"
+
+
+def test_sheet_decline_outcome_label():
+    from rpt_agent.services.sheet_sync import format_cadence_result
+
+    _label, outcome = format_cadence_result(
+        [{"channel": "call", "status": "delivered", "outcome": "not_interested"}],
+        {"status": "declined", "cadence_state": "terminated"},
+    )
+    assert outcome == "Answered - declined"
+
+
+def test_sheet_wrong_number_outcome_label():
+    from rpt_agent.services.sheet_sync import format_cadence_result
+
+    _label, outcome = format_cadence_result(
+        [{"channel": "call", "status": "delivered", "outcome": "manual"}],
+        {"status": "invalid_phone", "cadence_state": "paused"},
+    )
+    assert outcome == "Wrong number"
 
 
 def test_a_changed_decision_stops_the_waiting_link():

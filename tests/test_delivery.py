@@ -4,11 +4,15 @@ from rpt_agent.services.delivery import apply_twilio_message_status
 class _Result:
     rowcount = 1
 
-    def __init__(self, one=None):
+    def __init__(self, one=None, many=None):
         self.one = one
+        self.many = many if many is not None else ([] if one is None else [one])
 
     def fetchone(self):
         return self.one
+
+    def fetchall(self):
+        return self.many
 
 
 class _Connection:
@@ -80,3 +84,7 @@ def test_undelivered_cadence_sms_pauses_for_review():
     assert len(review_queries) == 1
     assert "needs_review=true" in review_queries[0]
     assert "'paused'" in review_queries[0]
+    skip = [(query, params) for query, params in conn.queries if "status='skipped'" in query]
+    assert len(skip) == 1
+    assert skip[0][1][0] == "paused_for_review"
+    assert skip[0][1][1] == "lead-1"

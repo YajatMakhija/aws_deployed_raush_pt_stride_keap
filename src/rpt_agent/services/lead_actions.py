@@ -316,9 +316,12 @@ def _restart_cadence(
     lead_data: dict[str, Any] | None = None,
 ) -> ActionExecution:
     lead = _locked_lead(conn, practice["id"], lead_id, phone)
-    if lead["status"] == "do_not_contact":
+    if lead["status"] in {"booked", "do_not_contact", "invalid_phone"}:
         raise LeadActionError(
-            409, "do_not_contact", "A Do Not Contact lead cannot be restarted", lead_id=str(lead_id)
+            409,
+            "restart_not_allowed",
+            "A booked, Do Not Contact, or invalid-phone lead cannot be restarted",
+            lead_id=str(lead_id),
         )
     if lead["call_opt_out"] and lead["sms_opt_out"]:
         raise LeadActionError(
@@ -338,6 +341,10 @@ def _restart_cadence(
         )
     if lead_data:
         _update_lead_profile(conn, lead_id, lead_data)
+
+    # Restart always creates a fresh run from Day 0, including when the old
+    # cadence was paused. Completed history remains intact; only unfinished
+    # planned/skipped rows are replaced.
     conn.execute(
         "delete from outreach_events where lead_id=%s and status in ('planned','skipped')",
         (lead_id,),

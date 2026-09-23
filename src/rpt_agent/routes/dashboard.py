@@ -15,7 +15,11 @@ from ..observability import WorkflowTrace
 from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
 from ..services.provider_http import ProviderError
-from ..services.review import flag_lead_for_review
+from ..services.review import (
+    flag_lead_for_review,
+    restore_pause_skipped,
+    skip_remaining_planned,
+)
 from ..services.twilio_service import TwilioService
 from ..worker import format_phone, materialize_cadence
 
@@ -752,6 +756,10 @@ def update_lead_cadence(lead_id: UUID, payload: CadenceAction, actor: Actor):
             raise HTTPException(status_code=409, detail="terminal leads cannot resume cadence")
         new_state = "paused" if payload.action == "pause" else "active"
         shifted = 0
+        if payload.action == "pause":
+            # Soft cadence_state alone is not enough when a remote worker is stale;
+            # skip remaining planned steps so nothing else can be claimed.
+            skip_remaining_planned(conn, str(lead_id))
         if payload.action == "resume":
             # Pause has to mean postpone, not suspend. The schedule keeps running
             # while a lead is paused, so without this every step that fell due
@@ -762,6 +770,7 @@ def update_lead_cadence(lead_id: UUID, payload: CadenceAction, actor: Actor):
             # spacing the cadence was designed with: day 5 still lands two days
             # after day 3. The pause start comes from the audit trail, which is
             # already the record of when it happened.
+            restore_pause_skipped(conn, str(lead_id))
             paused_at = conn.execute(
                 "select created_at from dashboard_audit_log where entity_type='lead' "
                 "and entity_id=%s and action='cadence.pause' order by created_at desc limit 1",
@@ -1113,6 +1122,7 @@ def move_lead_stage(lead_id: UUID, payload: StageMove, actor: Actor):
                 "review_flagged_at=now(),cadence_state='paused',status_changed_at=now() where id=%s",
                 ("moved to review from the board", lead_id),
             )
+            skip_remaining_planned(conn, str(lead_id))
         elif payload.stage == "closed":
             conn.execute(
                 "update leads set status='declined',cadence_state='terminated',needs_review=false,"

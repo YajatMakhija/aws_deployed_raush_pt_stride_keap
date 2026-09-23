@@ -224,6 +224,7 @@ with eligible as (
  join practices p on p.id=l.practice_id
  join practice_settings ps on ps.practice_id=l.practice_id
  where oe.status='planned' and oe.scheduled_for<=now() and l.cadence_state='active'
+ and not l.needs_review
  and l.status not in ('booked','declined','do_not_contact','invalid_phone')
  and ((oe.channel='call' and not l.call_opt_out) or (oe.channel='sms' and not l.sms_opt_out))
  and (oe.channel<>'call' or coalesce(l.line_type,'unknown')<>'mobile' or l.consent_captured_at is not null)

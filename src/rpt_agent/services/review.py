@@ -1,5 +1,28 @@
 from __future__ import annotations
 
+# Skipped by pause/review so Resume can restore only these rows, not DNC/closed skips.
+PAUSE_SKIP_REASON = "paused_for_review"
+
+
+def skip_remaining_planned(conn, lead_id: str, reason: str = PAUSE_SKIP_REASON) -> int:
+    """Stop later cadence steps from being claimed while the lead is on hold."""
+    rows = conn.execute(
+        "update outreach_events set status='skipped',failure_reason=%s,updated_at=now() "
+        "where lead_id=%s and status='planned' returning id",
+        (reason[:500], lead_id),
+    ).fetchall()
+    return len(rows)
+
+
+def restore_pause_skipped(conn, lead_id: str) -> int:
+    """Put pause/review-skipped steps back on the schedule when outreach resumes."""
+    rows = conn.execute(
+        "update outreach_events set status='planned',failure_reason=null,updated_at=now() "
+        "where lead_id=%s and status='skipped' and failure_reason=%s returning id",
+        (lead_id, PAUSE_SKIP_REASON),
+    ).fetchall()
+    return len(rows)
+
 
 def flag_lead_for_review(conn, lead_id: str, reason: str) -> None:
     """Pause non-terminal outreach whenever staff attention is required."""
@@ -14,3 +37,4 @@ def flag_lead_for_review(conn, lead_id: str, reason: str) -> None:
         "and status not in ('booked','declined','do_not_contact','closed_no_response')",
         (reason[:500], lead_id),
     )
+    skip_remaining_planned(conn, lead_id)
