@@ -242,7 +242,8 @@ with eligible as (
  and ((%(test_mode)s and l.is_test) or (
    oe.channel<>'call' or (
      select count(*) from outreach_events day_event
-     where day_event.lead_id=l.id and day_event.channel='call' and day_event.executed_at is not null
+     where day_event.lead_id in (select peer.id from leads peer where peer.practice_id=l.practice_id and peer.phone_e164=l.phone_e164)
+     and day_event.channel='call' and day_event.executed_at is not null
      and day_event.executed_at >= (
        date_trunc('day',now() at time zone coalesce(l.timezone,p.timezone))
        at time zone coalesce(l.timezone,p.timezone)
@@ -252,7 +253,8 @@ with eligible as (
  and ((%(test_mode)s and l.is_test) or (
    oe.channel<>'sms' or (
      select count(*) from outreach_events day_event
-     where day_event.lead_id=l.id and day_event.channel='sms' and day_event.executed_at is not null
+     where day_event.lead_id in (select peer.id from leads peer where peer.practice_id=l.practice_id and peer.phone_e164=l.phone_e164)
+     and day_event.channel='sms' and day_event.executed_at is not null
      and day_event.executed_at >= (
        date_trunc('day',now() at time zone coalesce(l.timezone,p.timezone))
        at time zone coalesce(l.timezone,p.timezone)

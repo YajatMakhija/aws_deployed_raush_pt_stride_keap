@@ -17,6 +17,7 @@ from ..security import DashboardActor, require_dashboard_auth
 from ..services.provider_http import ProviderError
 from ..services.review import (
     flag_lead_for_review,
+    hand_over_number,
     restore_pause_skipped,
     skip_remaining_planned,
 )
@@ -519,22 +520,10 @@ def create_dashboard_lead(payload: LeadCreate, actor: Actor):
             "and external_referral_id=%s",
             (practice["id"], payload.idempotency_key),
         ).fetchone()
+        warning = None
         if existing:
             lead_id = existing["id"]
         else:
-            # The phone number identifies the patient everywhere: Sheet rows,
-            # Twilio replies, VAPI calls. A second lead on the same number makes
-            # every one of those ambiguous, so it is refused here as it is on intake.
-            duplicate = conn.execute(
-                "select id,full_name from leads where practice_id=%s and phone_e164=%s "
-                "order by created_at desc limit 1",
-                (practice["id"], phone),
-            ).fetchone()
-            if duplicate:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"{duplicate['full_name']} already uses this phone number.",
-                )
             inserted = conn.execute(
                 "insert into leads(practice_id,source_system,external_referral_id,first_name,"
                 "last_name,full_name,phone_e164,phone_original,email,date_of_birth,timezone,"
@@ -571,6 +560,11 @@ def create_dashboard_lead(payload: LeadCreate, actor: Actor):
             )
             if not event_count:
                 raise HTTPException(status_code=409, detail="no active cadence is configured")
+            # Repeat patients reuse their number for a new referral; this one
+            # takes over and any other lead still in outreach on it stops.
+            warning = hand_over_number(
+                conn, practice_id=practice["id"], phone=phone, lead_id=str(lead_id)
+            )
             _audit(
                 conn,
                 actor,
@@ -602,7 +596,7 @@ def create_dashboard_lead(payload: LeadCreate, actor: Actor):
             ") next_event on true where l.id=%s",
             (lead_id,),
         ).fetchone()
-    return _lead(row)
+    return {**_lead(row), **({"warning": warning} if warning else {})}
 
 
 @router.get("/leads/{lead_id}")
@@ -1110,6 +1104,12 @@ def move_lead_stage(lead_id: UUID, payload: StageMove, actor: Actor):
             )
             restarted = materialize_cadence(
                 conn, str(lead_id), lead["practice_id"], datetime.now(UTC).date()
+            )
+            phone = conn.execute(
+                "select phone_e164 from leads where id=%s", (lead_id,)
+            ).fetchone()["phone_e164"]
+            hand_over_number(
+                conn, practice_id=lead["practice_id"], phone=phone, lead_id=str(lead_id)
             )
         elif payload.stage == "cadence":
             conn.execute(

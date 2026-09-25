@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from ..config import get_settings
 from ..db import transaction
 from ..worker import format_phone, materialize_cadence
+from .review import hand_over_number
 from .sheet_sync import enqueue_sheet_update
 
 TERMINAL_START_STATUSES = {
@@ -104,22 +105,6 @@ def _complete_request(
     )
 
 
-def _find_lead_by_phone(conn, practice_id: int, phone: str) -> dict[str, Any] | None:
-    rows = conn.execute(
-        "select id,practice_id,status,cadence_state,call_opt_out,sms_opt_out,phone_e164 "
-        "from leads where practice_id=%s and phone_e164=%s order by created_at desc "
-        "limit 2 for update",
-        (practice_id, phone),
-    ).fetchall()
-    if len(rows) > 1:
-        raise LeadActionError(
-            409,
-            "ambiguous_phone",
-            "More than one lead uses this phone number; staff review is required",
-        )
-    return rows[0] if rows else None
-
-
 def _update_lead_profile(conn, lead_id: str | UUID, lead_data: dict[str, Any]) -> None:
     """Refresh Sheet-owned lead details without changing phone identity or consent."""
     full_name = str(lead_data.get("full_name") or "").strip() or None
@@ -184,52 +169,42 @@ def _start_cadence(
                 "The phone number has not changed",
                 lead_id=str(replaces_lead_id),
             )
-    existing = _find_lead_by_phone(conn, practice["id"], phone)
-    if existing:
-        # A blank-Lead-ID Sheet row is a new intake attempt. Never mutate or
-        # restart an existing patient merely because that new row shares a phone.
-        raise LeadActionError(
-            409,
-            "lead_already_exists",
-            "Lead already exists",
-        )
-    else:
-        first_name, last_name = _name_parts(str(lead_data["full_name"]).strip())
-        stored_lead_type = str(
-            lead_data.get("lead_type") or lead_data.get("title") or ""
-        ).strip() or None
-        # Same rule as dashboard intake: while the deployment runs in test mode
-        # every new lead is a test lead (accelerated cadence, no calling-hours
-        # gate). Flipping TEST_MODE off makes Sheet leads real patients again.
-        settings = get_settings()
-        synthetic = settings.test_mode and settings.app_env.lower() in {"development", "test"}
-        inserted = conn.execute(
-            "insert into leads(practice_id,source_system,first_name,last_name,full_name,phone_e164,"
-            "phone_original,email,date_of_birth,timezone,line_type,consent_captured_at,"
-            "consent_source,consent_reference,consent_text_version,status,cadence_state,"
-            "lead_type,location,is_test) "
-            "values(%s,'google_sheets',%s,%s,%s,%s,%s,%s,%s,%s,'unknown',"
-            "now(),'dashboard_staff_attestation',%s,'google-sheet-staff-attestation-v1',"
-            "'new','pending',%s,%s,%s) returning id",
-            (
-                practice["id"],
-                first_name,
-                last_name,
-                str(lead_data["full_name"]).strip(),
-                phone,
-                lead_data["phone"],
-                str(lead_data["email"]).strip().lower() if lead_data.get("email") else None,
-                lead_data["date_of_birth"],
-                practice["timezone"],
-                f"n8n:{request_id}",
-                stored_lead_type,
-                str(lead_data["location"]).strip(),
-                synthetic,
-            ),
-        ).fetchone()
-        lead_id = str(inserted["id"])
-        previous_status = "new"
-        created = True
+    first_name, last_name = _name_parts(str(lead_data["full_name"]).strip())
+    stored_lead_type = str(
+        lead_data.get("lead_type") or lead_data.get("title") or ""
+    ).strip() or None
+    # Same rule as dashboard intake: while the deployment runs in test mode
+    # every new lead is a test lead (accelerated cadence, no calling-hours
+    # gate). Flipping TEST_MODE off makes Sheet leads real patients again.
+    settings = get_settings()
+    synthetic = settings.test_mode and settings.app_env.lower() in {"development", "test"}
+    inserted = conn.execute(
+        "insert into leads(practice_id,source_system,first_name,last_name,full_name,phone_e164,"
+        "phone_original,email,date_of_birth,timezone,line_type,consent_captured_at,"
+        "consent_source,consent_reference,consent_text_version,status,cadence_state,"
+        "lead_type,location,is_test) "
+        "values(%s,'google_sheets',%s,%s,%s,%s,%s,%s,%s,%s,'unknown',"
+        "now(),'dashboard_staff_attestation',%s,'google-sheet-staff-attestation-v1',"
+        "'new','pending',%s,%s,%s) returning id",
+        (
+            practice["id"],
+            first_name,
+            last_name,
+            str(lead_data["full_name"]).strip(),
+            phone,
+            lead_data["phone"],
+            str(lead_data["email"]).strip().lower() if lead_data.get("email") else None,
+            lead_data["date_of_birth"],
+            practice["timezone"],
+            f"n8n:{request_id}",
+            stored_lead_type,
+            str(lead_data["location"]).strip(),
+            synthetic,
+        ),
+    ).fetchone()
+    lead_id = str(inserted["id"])
+    previous_status = "new"
+    created = True
 
     event_count = materialize_cadence(
         conn, lead_id, practice["id"], datetime.now(UTC).date()
@@ -264,6 +239,7 @@ def _start_cadence(
         "values(%s,%s,'in_progress','n8n_sheet','cadence started from Google Sheets')",
         (lead_id, previous_status),
     )
+    warning = hand_over_number(conn, practice_id=practice["id"], phone=phone, lead_id=lead_id)
     enqueue_sheet_update(
         conn,
         lead_id=lead_id,
@@ -281,6 +257,7 @@ def _start_cadence(
             "result": "cadence_started",
             "created": created,
             "cadence_event_count": event_count,
+            **({"warning": warning} if warning else {}),
         },
     )
 
@@ -371,6 +348,9 @@ def _restart_cadence(
         "values(%s,%s,'in_progress','n8n_sheet','cadence restarted from Google Sheets')",
         (lead_id, lead["status"]),
     )
+    warning = hand_over_number(
+        conn, practice_id=practice["id"], phone=lead["phone_e164"], lead_id=str(lead_id)
+    )
     enqueue_sheet_update(
         conn,
         lead_id=str(lead_id),
@@ -387,6 +367,7 @@ def _restart_cadence(
             "result": "cadence_restarted",
             "created": False,
             "cadence_event_count": event_count,
+            **({"warning": warning} if warning else {}),
         },
     )
 

@@ -52,11 +52,15 @@ class CreateLeadConnection:
             return Result([{"id": 1, "timezone": "America/Los_Angeles"}])
         if "source_system='dashboard'" in sql:
             return Result([])
-        if "select id,full_name from leads where practice_id=%s and phone_e164=%s" in sql:
+        if "phone_e164=%s and id<>%s" in sql:
             return Result(
-                [{"id": uuid4(), "full_name": self.existing_phone_owner}]
+                [{"id": uuid4(), "full_name": self.existing_phone_owner, "lead_type": "Knee",
+                  "status": "closed_no_response", "cadence_state": "completed",
+                  "call_opt_out": False, "sms_opt_out": False}]
                 if self.existing_phone_owner else []
             )
+        if sql.startswith("update leads set call_opt_out=call_opt_out"):
+            return Result([])
         if "insert into leads" in sql:
             self.created_is_test = bool(params[-2])
             self.created_lead_type = params[12]
@@ -205,7 +209,7 @@ def test_dashboard_snapshot_uses_authenticated_actor(monkeypatch):
         get_settings.cache_clear()
 
 
-def test_second_lead_on_the_same_phone_number_is_refused(monkeypatch):
+def test_second_lead_on_the_same_phone_number_is_allowed_with_a_warning(monkeypatch):
     monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
     get_settings.cache_clear()
     connection = CreateLeadConnection(existing_phone_owner="Rudraksh Mehta")
@@ -236,8 +240,8 @@ def test_second_lead_on_the_same_phone_number_is_refused(monkeypatch):
                 "X-Dashboard-User-Email": "staff@example.test",
             },
         )
-        assert response.status_code == 409
-        assert "Rudraksh Mehta" in response.json()["detail"]
+        assert response.status_code == 201, response.json()
+        assert "Rudraksh Mehta (Knee)" in response.json()["warning"]
     finally:
         get_settings.cache_clear()
 
@@ -376,6 +380,7 @@ class RestartConnection:
                 "needs_review": False,
                 "call_opt_out": False,
                 "sms_opt_out": False,
+                "phone_e164": "+15550000001",
             }])
         return Result([])
 

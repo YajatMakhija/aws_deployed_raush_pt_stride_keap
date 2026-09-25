@@ -654,11 +654,13 @@ def test_sheet_outbox_event_is_minimal_and_idempotent():
     assert set(params[3].obj) == {"lead_id", "reason", "outreach_event_id"}
 
 
-def test_start_cadence_rejects_duplicate_phone_without_writing(monkeypatch):
-    lead_id = UUID("00000000-0000-0000-0000-000000000002")
-    lead = {"id": lead_id, "practice_id": 1, "status": "closed_no_response",
-            "cadence_state": "completed", "call_opt_out": False,
-            "sms_opt_out": False, "phone_e164": "+15555550100"}
+def test_repeat_patient_on_same_number_takes_over_and_warns(monkeypatch):
+    """Repeat patients are referred again for another body region with the same
+    number. The new lead starts; the older lead still in outreach stops, so the
+    patient is never worked twice; staff get a warning naming the older lead."""
+    older = {"id": UUID("00000000-0000-0000-0000-000000000009"), "full_name": "Emma Katko",
+             "lead_type": "Knee", "status": "in_progress", "cadence_state": "active",
+             "call_opt_out": False, "sms_opt_out": True}
 
     class Connection:
         def __init__(self):
@@ -667,23 +669,28 @@ def test_start_cadence_rejects_duplicate_phone_without_writing(monkeypatch):
         def execute(self, query, params=None):
             normalized = " ".join(query.split())
             self.queries.append(normalized)
-            if "where practice_id=%s and phone_e164=%s" in normalized:
-                return _Rows(many=[lead])
+            if normalized.startswith("insert into leads"):
+                return _Rows(one={"id": UUID("00000000-0000-0000-0000-000000000002")})
+            if "phone_e164=%s and id<>%s" in normalized:
+                return _Rows(many=[older])
             return _Rows()
 
     conn = Connection()
     monkeypatch.setattr(lead_actions, "materialize_cadence", lambda *args: 8)
-    with pytest.raises(lead_actions.LeadActionError) as exc_info:
-        lead_actions._start_cadence(
-            conn,
-            request_id=UUID("00000000-0000-0000-0000-000000000001"),
-            practice={"id": 1, "timezone": "America/Los_Angeles"},
-            lead_data={"phone": "+15555550100"},
-        )
+    result = lead_actions._start_cadence(
+        conn,
+        request_id=UUID("00000000-0000-0000-0000-000000000001"),
+        practice={"id": 1, "timezone": "America/Los_Angeles"},
+        lead_data={"phone": "+15555550100", "full_name": "Emma Katko", "email": None,
+                   "date_of_birth": None, "location": "Dana Point", "lead_type": "Lower back"},
+    )
 
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.code == "lead_already_exists"
-    assert not any(query.startswith("update leads") for query in conn.queries)
+    assert result.status_code == 201
+    assert result.body["warning"] == "This number is also on file as Emma Katko (Knee)."
+    assert any("cadence_state='terminated'" in q for q in conn.queries), conn.queries
+    assert any(q.startswith("update outreach_events set status='skipped'") for q in conn.queries)
+    # She opted out of texts on the knee referral; that follows her number.
+    assert any("sms_opt_out=sms_opt_out or" in q for q in conn.queries)
 
 
 def test_sheet_team_can_mark_booked_without_an_appointment():

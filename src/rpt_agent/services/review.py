@@ -44,3 +44,54 @@ def flag_lead_for_review(conn, lead_id: str, reason: str) -> None:
         (reason[:500], lead_id),
     )
     skip_remaining_planned(conn, lead_id)
+
+
+REPLACED_REASON = "replaced by a newer referral on this number"
+
+
+def hand_over_number(conn, *, practice_id: int, phone: str, lead_id: str) -> str | None:
+    """Make `lead_id` the one lead working this phone number.
+
+    Repeat patients come back for another body region and reuse their number, so
+    several leads may share it - but only one cadence may run, or the patient is
+    called twice a day. Every other lead still in outreach on the number stops
+    here (its history stays). Opt-outs belong to the person, not the referral,
+    so the new lead inherits any the number already has.
+
+    Returns a warning naming the other leads on the number, or None.
+    """
+    others = conn.execute(
+        "select id,full_name,lead_type,status,cadence_state,call_opt_out,sms_opt_out "
+        "from leads where practice_id=%s and phone_e164=%s and id<>%s "
+        "order by created_at for update",
+        (practice_id, phone, lead_id),
+    ).fetchall()
+    if not others:
+        return None
+    for other in others:
+        if other["cadence_state"] in {"pending", "active", "paused"}:
+            conn.execute(
+                "update leads set cadence_state='terminated',status_reason=%s,"
+                "status_changed_at=now() where id=%s",
+                (REPLACED_REASON, other["id"]),
+            )
+            skip_remaining_planned(conn, str(other["id"]), REPLACED_REASON)
+            conn.execute(
+                "insert into lead_status_history(lead_id,from_status,to_status,source,reason) "
+                "values(%s,%s,%s,'system',%s)",
+                (other["id"], other["status"], other["status"], REPLACED_REASON),
+            )
+    conn.execute(
+        "update leads set call_opt_out=call_opt_out or %s,sms_opt_out=sms_opt_out or %s "
+        "where id=%s",
+        (
+            any(o["call_opt_out"] for o in others),
+            any(o["sms_opt_out"] for o in others),
+            lead_id,
+        ),
+    )
+    names = ", ".join(
+        f"{o['full_name']} ({o['lead_type']})" if o["lead_type"] else str(o["full_name"])
+        for o in others
+    )
+    return f"This number is also on file as {names}."
