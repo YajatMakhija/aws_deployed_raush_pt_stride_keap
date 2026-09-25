@@ -293,13 +293,16 @@ def _restart_cadence(
     lead_data: dict[str, Any] | None = None,
 ) -> ActionExecution:
     lead = _locked_lead(conn, practice["id"], lead_id, phone)
-    if lead["status"] in {"booked", "do_not_contact", "invalid_phone"}:
+    if lead["status"] in {"do_not_contact", "invalid_phone"}:
         raise LeadActionError(
             409,
             "restart_not_allowed",
-            "A booked, Do Not Contact, or invalid-phone lead cannot be restarted",
+            "A Do Not Contact or invalid-phone lead cannot be restarted",
             lead_id=str(lead_id),
         )
+    # Booked may be restarted: a mis-clicked Booked needs an undo, and marking
+    # Booked again is the undo for a mis-clicked restart.
+    was_booked = lead["status"] == "booked"
     if lead["call_opt_out"] and lead["sms_opt_out"]:
         raise LeadActionError(
             409, "all_channels_blocked", "This lead opted out of every channel", lead_id=str(lead_id)
@@ -368,6 +371,7 @@ def _restart_cadence(
             "created": False,
             "cadence_event_count": event_count,
             **({"warning": warning} if warning else {}),
+            **({"was_booked": True} if was_booked else {}),
         },
     )
 

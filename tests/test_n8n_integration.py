@@ -691,6 +691,29 @@ def test_repeat_patient_on_same_number_takes_over_and_warns(monkeypatch):
     assert any(q.startswith("update outreach_events set status='skipped'") for q in conn.queries)
     # She opted out of texts on the knee referral; that follows her number.
     assert any("sms_opt_out=sms_opt_out or" in q for q in conn.queries)
+    # A replaced lead has nothing left to act on, so it must leave Needs Attention.
+    assert any("needs_review=false" in q and "cadence_state='terminated'" in q for q in conn.queries)
+
+
+def test_same_number_warning_mentions_an_earlier_wrong_number():
+    from datetime import datetime as dt
+
+    from rpt_agent.services.review import hand_over_number
+
+    wrong = {"id": UUID("00000000-0000-0000-0000-000000000009"), "full_name": "Cris Test",
+             "lead_type": None, "status": "invalid_phone", "cadence_state": "paused",
+             "call_opt_out": False, "sms_opt_out": False,
+             "status_changed_at": dt(2026, 9, 25, 15, 0, tzinfo=UTC)}
+
+    class Connection:
+        def execute(self, query, params=None):
+            return _Rows(many=[wrong]) if "id<>%s" in query else _Rows()
+
+    warning = hand_over_number(Connection(), practice_id=1, phone="+15555550100", lead_id="new")
+    assert warning == (
+        "This number is also on file as Cris Test. "
+        "It was marked as a wrong number on Cris Test on Sep 25."
+    )
 
 
 def test_sheet_team_can_mark_booked_without_an_appointment():
@@ -779,7 +802,32 @@ def test_restart_always_starts_again_from_day_zero(monkeypatch, previous_state):
     assert any(query.startswith("delete from outreach_events") for query in statements)
 
 
-@pytest.mark.parametrize("status", ["booked", "do_not_contact", "invalid_phone"])
+def test_booked_lead_can_be_restarted_and_says_so(monkeypatch):
+    """A mis-clicked Booked needs an undo; Booked again undoes a mis-clicked
+    restart. The response flags it so the Sheet can show "(was Booked)"."""
+    conn = _RestartConnection("completed")
+    original_execute = conn.execute
+
+    def execute(query, params=None):
+        result = original_execute(query, params)
+        if "select id,practice_id,status,cadence_state" in " ".join(query.split()):
+            result.one["status"] = "booked"
+        return result
+
+    conn.execute = execute
+    monkeypatch.setattr(lead_actions, "materialize_cadence", lambda *args, **kwargs: 8)
+    result = lead_actions._restart_cadence(
+        conn,
+        request_id=UUID("00000000-0000-0000-0000-000000000001"),
+        practice={"id": 1},
+        lead_id=UUID("00000000-0000-0000-0000-000000000002"),
+        phone="+15555550100",
+    )
+    assert result.body["result"] == "cadence_restarted"
+    assert result.body["was_booked"] is True
+
+
+@pytest.mark.parametrize("status", ["do_not_contact", "invalid_phone"])
 def test_restart_refuses_terminal_or_unsafe_leads(status):
     conn = _RestartConnection("paused")
     original_execute = conn.execute

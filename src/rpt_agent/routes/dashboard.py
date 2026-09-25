@@ -16,6 +16,7 @@ from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
 from ..services.provider_http import ProviderError
 from ..services.review import (
+    REPLACED_REASON,
     flag_lead_for_review,
     hand_over_number,
     restore_pause_skipped,
@@ -226,6 +227,8 @@ def _lead(row: dict) -> dict:
     if stage in {"closed", "booked"}:
         # Outreach has stopped, so never advertise a next action that will not run.
         next_step = CLOSED_REASON.get(row["status"], "Outreach complete")
+        if row.get("status_reason") == REPLACED_REASON:
+            next_step = "Replaced by newer referral"
         next_status = None
     return {
         "id": str(row["id"]),
@@ -361,7 +364,7 @@ def dashboard_snapshot(actor: Actor):
         rows = conn.execute(
             "select l.id,l.full_name,l.phone_e164,l.email,l.source_system,l.status,l.cadence_state,"
             "l.needs_review,l.review_reason,l.created_at,l.last_contacted_at,l.date_of_birth,"
-            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,l.timezone,"
+            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,l.timezone,l.status_reason,"
             "current_version.name as cadence_version_name,"
             "(select count(*) from outreach_events progress where progress.lead_id=l.id "
             "and progress.cadence_version_id=current_version.id "
@@ -582,7 +585,7 @@ def create_dashboard_lead(payload: LeadCreate, actor: Actor):
         row = conn.execute(
             "select l.id,l.full_name,l.phone_e164,l.email,l.source_system,l.status,l.cadence_state,"
             "l.needs_review,l.review_reason,l.created_at,l.last_contacted_at,l.date_of_birth,"
-            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,l.timezone,"
+            "l.referred_by,l.lead_type,l.location,l.owner,l.is_test,l.timezone,l.status_reason,"
             "(select count(*) from outreach_events progress where progress.lead_id=l.id "
             "and progress.status<>'planned') as cadence_progress,"
             "(select count(*) from outreach_events total where total.lead_id=l.id) as cadence_total,"

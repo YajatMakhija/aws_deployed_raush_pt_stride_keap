@@ -61,7 +61,8 @@ def hand_over_number(conn, *, practice_id: int, phone: str, lead_id: str) -> str
     Returns a warning naming the other leads on the number, or None.
     """
     others = conn.execute(
-        "select id,full_name,lead_type,status,cadence_state,call_opt_out,sms_opt_out "
+        "select id,full_name,lead_type,status,cadence_state,call_opt_out,sms_opt_out,"
+        "status_changed_at "
         "from leads where practice_id=%s and phone_e164=%s and id<>%s "
         "order by created_at for update",
         (practice_id, phone, lead_id),
@@ -70,9 +71,11 @@ def hand_over_number(conn, *, practice_id: int, phone: str, lead_id: str) -> str
         return None
     for other in others:
         if other["cadence_state"] in {"pending", "active", "paused"}:
+            # needs_review goes too: the board shows any flagged lead in Needs
+            # Attention first, and a replaced lead has nothing left to act on.
             conn.execute(
                 "update leads set cadence_state='terminated',status_reason=%s,"
-                "status_changed_at=now() where id=%s",
+                "needs_review=false,status_changed_at=now() where id=%s",
                 (REPLACED_REASON, other["id"]),
             )
             skip_remaining_planned(conn, str(other["id"]), REPLACED_REASON)
@@ -94,4 +97,15 @@ def hand_over_number(conn, *, practice_id: int, phone: str, lead_id: str) -> str
         f"{o['full_name']} ({o['lead_type']})" if o["lead_type"] else str(o["full_name"])
         for o in others
     )
-    return f"This number is also on file as {names}."
+    warning = f"This number is also on file as {names}."
+    # A wrong number is a warning, not a block: staff may have corrected the
+    # record (the name, not the number, is often what was wrong).
+    wrong = [o for o in others if o["status"] == "invalid_phone"]
+    if wrong:
+        marked = ", ".join(
+            f"{o['full_name']} on {o['status_changed_at']:%b} {o['status_changed_at'].day}"
+            if o["status_changed_at"] else str(o["full_name"])
+            for o in wrong
+        )
+        warning += f" It was marked as a wrong number on {marked}."
+    return warning
