@@ -90,26 +90,57 @@ def test_undelivered_cadence_sms_pauses_for_review():
     assert skip[0][1][1] == "lead-1"
 
 
-def test_hang_up_during_intro_is_not_a_refusal():
-    """Rohan confirmed his name and hung up while Sarah introduced herself. The
-    summary read that as "declined" and closed his outreach. Only the patient
-    saying no may end it."""
-    from rpt_agent.services.delivery import _patient_refused
+def _settle_with(monkeypatch, structured):
+    """Run the post-call fallback on one extractor result; return the status
+    it applied, or "review" when the call went to staff instead."""
+    from contextlib import contextmanager
 
-    rohan = {"artifact": {"messages": [
-        {"role": "user", "message": "Hello?"},
-        {"role": "bot", "message": "Hi. Am I speaking with Rohan?"},
-        {"role": "user", "message": "Yes."},
-        {"role": "bot", "message": "Great. This is Sarah calling from Rausch"},
-    ]}}
-    assert not _patient_refused(rohan)
+    from rpt_agent.observability import WorkflowTrace
+    from rpt_agent.services import delivery, lead_status
 
-    refused = {"artifact": {"messages": [
-        {"role": "bot", "message": "Would you like to schedule?"},
-        {"role": "user", "message": "No, I’m not interested, please don’t call again."},
-    ]}}
-    assert _patient_refused(refused)
+    applied = {}
 
-    # Transcript-only reports (no message list) are read the same way.
-    assert _patient_refused({"artifact": {"transcript": "AI: Hi\nUser: stop calling me"}})
-    assert not _patient_refused({"artifact": {"transcript": "AI: not interested?\nUser: Yes."}})
+    class Conn:
+        def execute(self, sql, params=None):
+            if "needs_review=true" in sql or "outcome='manual'" in sql:
+                applied.setdefault("status", "review")
+            return self
+
+        def fetchone(self):
+            return {"outcome": applied.get("status")}
+
+        def fetchall(self):
+            return []
+
+    @contextmanager
+    def fake_transaction():
+        yield Conn()
+
+    def fake_report(trace, **kwargs):
+        applied["status"], applied["notes"] = kwargs["status"], kwargs["notes"]
+
+    monkeypatch.setattr(delivery, "transaction", fake_transaction)
+    monkeypatch.setattr(lead_status, "report_lead_status", fake_report)
+    message = {"artifact": {"structuredOutputs": {"x": {"result": structured}}}}
+    delivery._settle_from_structured_output(
+        WorkflowTrace("t", "test"), message, lead_id="lead-1", event_id=1, call_id="c"
+    )
+    return applied
+
+
+def test_hang_up_with_no_decision_keeps_outreach_going(monkeypatch):
+    """Rohan hung up during the introduction. The extractor is told that is not
+    a refusal and leaves status out; that must count as a missed contact."""
+    applied = _settle_with(monkeypatch, {"summary": "Call ended during the introduction."})
+    assert applied["status"] == "no_answer"
+
+
+def test_extractor_refusal_and_opt_out_are_applied_with_their_note(monkeypatch):
+    applied = _settle_with(monkeypatch, {"status": "declined", "summary": "Said she is all set."})
+    assert applied == {"status": "declined", "notes": "Said she is all set."}
+    assert _settle_with(monkeypatch, {"status": "do_not_contact"})["status"] == "do_not_contact"
+
+
+def test_failed_extraction_goes_to_staff(monkeypatch):
+    """An empty object is what an extraction that ran out of tokens returns."""
+    assert _settle_with(monkeypatch, {})["status"] == "review"

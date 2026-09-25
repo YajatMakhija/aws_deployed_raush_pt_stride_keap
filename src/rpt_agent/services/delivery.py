@@ -272,7 +272,9 @@ def _structured_outcome(message: dict) -> dict | None:
         return None
     for entry in outputs.values():
         result = entry.get("result") if isinstance(entry, dict) else None
-        if isinstance(result, dict) and result.get("status"):
+        # An empty object is an extraction that failed (it has run out of
+        # tokens before). Anything else is an answer, including "no decision".
+        if isinstance(result, dict) and result:
             return result
     return None
 
@@ -295,37 +297,6 @@ def _assistant_spoke(message: dict) -> bool:
         isinstance(item, dict) and item.get("role") == "bot" and str(item.get("message") or "").strip()
         for item in artifact.get("messages") or []
     )
-
-
-# Outcomes that end outreach. Only the patient can end it: a hang-up, silence or
-# a summary's reading of either is not a refusal, so a summary alone is not
-# enough to apply one of these.
-_ENDING_STATUSES = {"declined", "not_interested", "do_not_contact", "call_opt_out"}
-_REFUSAL_PHRASES = (
-    "not interested", "no interest", "don't call", "dont call", "do not call",
-    "stop calling", "stop contacting", "remove me", "take me off", "no thanks",
-    "no thank you", "don't want", "dont want", "do not want", "leave me alone",
-    "not looking", "already have", "unsubscribe",
-)
-
-
-def _patient_refused(message: dict) -> bool:
-    """Whether the patient's own words on the call include a refusal."""
-    artifact = message.get("artifact") if isinstance(message.get("artifact"), dict) else {}
-    said = " ".join(
-        str(item.get("message") or "")
-        for item in artifact.get("messages") or []
-        if isinstance(item, dict) and item.get("role") == "user"
-    )
-    if not said:
-        transcript, _ = _call_text_artifacts(message)
-        said = " ".join(
-            line.split(":", 1)[1]
-            for line in (transcript or "").splitlines()
-            if line.strip().lower().startswith(("user:", "customer:"))
-        )
-    said = said.lower().replace("’", "'")
-    return any(phrase in said for phrase in _REFUSAL_PHRASES)
 
 
 def _settle_from_structured_output(
@@ -352,16 +323,12 @@ def _settle_from_structured_output(
             )
         trace.log("state_transition_applied", transition="fallback_review", event_id=event_id)
         return "manual"
-    status = str(result.get("status") or "")
+    # The extractor is told a hang-up is not a refusal and that any wording of
+    # "stop contacting me" is do_not_contact, so its judgement is applied as-is.
+    # No status means the patient never decided: count it as a missed contact
+    # and keep the cadence going - only the patient can end outreach.
+    status = str(result.get("status") or "").strip() or "no_answer"
     summary_note = str(result.get("summary") or "")
-    if status.strip().lower() in _ENDING_STATUSES and not _patient_refused(message):
-        # The agent never recorded a decision and the patient never said no -
-        # typically a hang-up during the introduction. Treat it as a missed
-        # contact so the cadence keeps going, rather than closing the lead on
-        # the summary's reading of an unfinished call.
-        trace.log("fallback_refusal_ignored", event_id=event_id, extracted=status)
-        status = "no_answer"
-        summary_note = "Call ended before the patient gave a decision; outreach continues."
     try:
         report_lead_status(
             trace,
