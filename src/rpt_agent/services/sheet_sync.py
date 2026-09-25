@@ -98,6 +98,8 @@ def _call_label(event: dict[str, Any], lead: dict[str, Any]) -> str:
 def _sms_label(event: dict[str, Any]) -> str:
     if event.get("delivery_status") == "delivered":
         return "Delivered"
+    if event.get("delivery_status") == "sent":
+        return "Sent"
     if event.get("status") == "unknown":
         return "Needs staff review"
     return "Not delivered"
@@ -181,7 +183,7 @@ def build_sheet_snapshot(
         "and (%s::timestamptz is null or oe.created_at>=%s::timestamptz) and ("
         "(oe.channel='call' and oe.status in ('delivered','failed','unknown') "
         "and oe.settled_at is not null) or "
-        "(oe.channel='sms' and (sm.delivery_status in ('delivered','failed','undelivered') "
+        "(oe.channel='sms' and (sm.delivery_status in ('sent','delivered','failed','undelivered') "
         "or (oe.status in ('failed','unknown') and oe.settled_at is not null)))) "
         "order by finished_at desc nulls last,oe.id desc limit 1",
         (lead_id, run_started_at, run_started_at),
@@ -198,7 +200,7 @@ def build_sheet_snapshot(
             "and (%s::timestamptz is null or oe.created_at>=%s::timestamptz) and ("
             "(oe.channel='call' and oe.status in ('delivered','failed','unknown') "
             "and oe.settled_at is not null) or "
-            "(oe.channel='sms' and (sm.delivery_status in ('delivered','failed','undelivered') "
+            "(oe.channel='sms' and (sm.delivery_status in ('sent','delivered','failed','undelivered') "
             "or (oe.status in ('failed','unknown') and oe.settled_at is not null)))) "
             "order by finished_at,oe.id",
             (lead_id, latest["day_offset"], run_started_at, run_started_at),

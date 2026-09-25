@@ -144,3 +144,37 @@ def test_extractor_refusal_and_opt_out_are_applied_with_their_note(monkeypatch):
 def test_failed_extraction_goes_to_staff(monkeypatch):
     """An empty object is what an extraction that ran out of tokens returns."""
     assert _settle_with(monkeypatch, {})["status"] == "review"
+
+
+def test_sent_without_delivery_receipt_settles_the_step():
+    """Olivia's carrier never returned a delivery receipt: Twilio stayed at
+    "sent", the step stayed attempted, and the cadence froze behind it."""
+    from rpt_agent.services.delivery import apply_twilio_message_status
+
+    class Result:
+        def __init__(self, one=None):
+            self.one, self.rowcount = one, 1
+
+        def fetchone(self):
+            return self.one
+
+    class Conn:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, sql, params=None):
+            self.queries.append((" ".join(sql.split()), params))
+            if sql.startswith("update sms_messages"):
+                return Result({"lead_id": "lead-1", "outreach_event_id": 7,
+                               "delivery_status": "sent", "failure_reason": None})
+            if "returning oe.id,oe.lead_id" in sql:
+                return Result({"id": 7, "lead_id": "lead-1"})
+            return Result()
+
+    conn = Conn()
+    apply_twilio_message_status(conn, {"MessageSid": "SM-1", "MessageStatus": "sent"})
+    settle = [(q, p) for q, p in conn.queries if q.startswith("update outreach_events oe")]
+    assert settle, "a sent text must settle its cadence step"
+    assert "when %s in ('sent','delivered') then 'delivered'" in settle[0][0]
+    assert settle[0][1][0] == "sent"
+    assert not any("needs_review=true" in q for q, _ in conn.queries)

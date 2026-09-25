@@ -570,11 +570,20 @@ def apply_twilio_message_status(conn, form_data: dict[str, str]) -> int:
         (mapped, mapped, mapped, mapped, mapped, sid),
     ).rowcount
     actual_status = sms_record["delivery_status"] if sms_record else None
-    if actual_status in {"delivered", "failed", "undelivered"} and sms_record["outreach_event_id"]:
+    # "sent" settles the step too. Twilio only reports "delivered" when the
+    # carrier returns a receipt, and many never do - toll-free numbers especially -
+    # so waiting for it froze the cadence behind a text the patient had received.
+    # A later "failed"/"undelivered" still turns the step failed and flags the lead.
+    if (
+        actual_status in {"sent", "delivered", "failed", "undelivered"}
+        and sms_record["outreach_event_id"]
+    ):
         event = conn.execute(
-            "update outreach_events oe set status=case when %s='delivered' then 'delivered' "
-            "else 'failed' end,settled_at=coalesce(oe.settled_at,now()),settled_by='webhook',"
-            "failure_reason=case when %s='delivered' then oe.failure_reason else %s end,"
+            "update outreach_events oe set status=case when %s in ('sent','delivered') "
+            "then 'delivered' else 'failed' end,settled_at=coalesce(oe.settled_at,now()),"
+            "settled_by='webhook',"
+            "failure_reason=case when %s in ('sent','delivered') then oe.failure_reason "
+            "else %s end,"
             "updated_at=now() where oe.id=%s returning oe.id,oe.lead_id",
             (
                 actual_status,
