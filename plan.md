@@ -28,7 +28,7 @@ The Sheet never talks directly to Supabase, Vapi, or Twilio.
 ## 2. Exact Sheet columns
 
 ```text
-Lead ID | Name | Phone Number | Email | Date Of Birth | Location | Title | Action |
+Lead ID | Name | Phone Number | Email | Date Of Birth | Location | Case | Action |
 Action Status | Cadence Day | Cadence events | Call Outcome | Message Outcome | Email Outcome |
 Needs Review | Transcript Link | Callback At |
 Action Request ID | Action Started At
@@ -42,7 +42,7 @@ Action Request ID | Action Started At
 | Email | Optional email | Staff |
 | Date Of Birth | Staff enters `DD/MM/YYYY`; n8n sends `YYYY-MM-DD` | Staff |
 | Location | Location text | Staff |
-| Title | Any non-empty lead type/title | Staff |
+| Case | Any non-empty case/lead type | Staff |
 | Action | `Start cadence`, `Restart cadence`, `Do not contact`, or `Booked` | Staff |
 | Action Status | Processing, success, duplicate, review, or error result | n8n |
 | Cadence Day | Most recently completed cadence day, for example `Day 5` | AWS status sync |
@@ -243,7 +243,7 @@ states and inbound replies. These endpoints update Supabase first; they never ca
 1. Google Sheets Trigger sees an edited row.
 2. Continue only when Action is Start cadence, Restart cadence, Do Not Contact, or Booked and Action Status is blank. This prevents
    the workflow from reprocessing its own Sheet update forever.
-3. Normalize phone and DOB. Accept a one-word Name and any non-empty Title.
+3. Normalize phone and DOB. Accept a one-word Name and any non-empty Case.
 4. Generate one Action Request ID.
 5. Using the trigger `row_number`, write `Processing: <Action>`, Action Request ID, and Action Started At to
    that exact row.

@@ -960,9 +960,12 @@ def test_profile_sync_workflow_matches_the_database_lead_id():
     nodes = {node["name"]: node for node in workflow["nodes"]}
     trigger = nodes["Profile Fields Changed"]["parameters"]
     assert "Lead ID" not in trigger["options"]["columnsToWatch"]
+    assert "Case" in trigger["options"]["columnsToWatch"]
+    assert "Title" not in trigger["options"]["columnsToWatch"]
     build = nodes["Build and Sign Profile Sync"]["parameters"]["jsCode"]
     assert "lead_id:oldLeadId" in build
     assert "row['Lead ID']" in build
+    assert "row.Case" in build and "row.Title" not in build
     request = nodes["POST Lead Sync to AWS"]["parameters"]
     assert "/api/v1/integrations/n8n/lead-sync" in request["url"]
     assert "RPT_BACKEND_BASE_URL" in request["url"]
@@ -979,6 +982,30 @@ def test_profile_sync_workflow_matches_the_database_lead_id():
     ] == "Sync Failed?"
     error_update = nodes["Write Sync Error by Lead ID"]["parameters"]
     assert error_update["columns"]["matchingColumns"] == ["Lead ID"]
+
+
+def test_n8n_intake_and_recovery_read_the_case_sheet_column():
+    workflow_dir = Path("config/n8n/workflows")
+    intake = json.loads(
+        (workflow_dir / "01-lead-action-intake.workflow.json").read_text(encoding="utf-8")
+    )
+    recovery = json.loads(
+        (workflow_dir / "02-lead-action-recovery.workflow.json").read_text(encoding="utf-8")
+    )
+    intake_code = next(
+        node["parameters"]["jsCode"]
+        for node in intake["nodes"]
+        if node["name"] == "Validate and Build Intake"
+    )
+    recovery_code = next(
+        node["parameters"]["jsCode"]
+        for node in recovery["nodes"]
+        if node["name"] == "Build Recovery Requests"
+    )
+
+    assert "'Case'" in intake_code and "row.Case" in intake_code
+    assert "row.Case" in recovery_code
+    assert "row.Title" not in intake_code + recovery_code
 
 
 def test_n8n_intake_retries_are_finite_and_recover_legacy_processing_rows():

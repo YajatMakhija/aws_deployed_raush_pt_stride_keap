@@ -21,7 +21,7 @@ The complete variable, API, authentication, failure, and testing contract is in 
 ## Exact Sheet headers
 
 ```text
-Lead ID | Name | Phone Number | Email | Date Of Birth | Location | Title | Action |
+Lead ID | Name | Phone Number | Email | Date Of Birth | Location | Case | Action |
 Needs Review | Action Status | Cadence Day | Cadence events | Call Outcome | Message Outcome |
 Email Outcome | Transcript Link | Callback At |
 Action Request ID | Action Started At
@@ -52,7 +52,7 @@ Booked
 ```
 
 Enter Date Of Birth as `DD/MM/YYYY`. The intake workflow converts it to ISO `YYYY-MM-DD` before signing and
-sending it. A one-word Name is valid. Title and lead_type are aliases for the same value; any
+sending it. A one-word Name is valid. The Sheet's Case column is sent as the backend `lead_type`; any
 non-empty text is accepted under either name.
 
 ## n8n environment
@@ -85,7 +85,7 @@ Existing-row profile/phone sync:
 POST {RPT_BACKEND_BASE_URL}/api/v1/integrations/n8n/lead-sync
 ```
 
-Create a separate Google trigger for `Name`, `Phone Number`, `Email`, `Date Of Birth`, `Location`, and `Title`.
+Create a separate Google trigger for `Name`, `Phone Number`, `Email`, `Date Of Birth`, `Location`, and `Case`.
 Send rows only when Lead ID exists. A same-phone response updates only the database and stops. A changed-phone
 response keeps the existing Lead ID and cadence unchanged; update only that triggering row's Action Status to
 `Phone number changed; needs review`. Reuse the intake HMAC key and signing logic.

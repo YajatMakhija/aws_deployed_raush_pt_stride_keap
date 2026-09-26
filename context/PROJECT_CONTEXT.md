@@ -252,7 +252,7 @@ defect where a null `stride_location_timezone` caused `ZoneInfo(None)` during co
 Runtime delivery also falls back to the lead timezone and then `America/Los_Angeles`.
 23. `023_google_sheets_n8n_integration.sql` — adds signed Sheet-action idempotency, destination-routed n8n
     outbox work, and stored authenticated dashboard transcript links.
-24. `024_free_text_lead_type.sql` — removes the old two-value `leads.lead_type` restriction so Sheet `Title`
+24. `024_free_text_lead_type.sql` — removes the old two-value `leads.lead_type` restriction so Sheet `Case`
     and API `lead_type` can store the same validated free-text value.
 
 Migrations through 022 are applied to the currently configured hosted Supabase project. The required Sheet
@@ -1183,9 +1183,9 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - Replaced the mixed Sheet output model with one-purpose columns: staff owns `Action`; system results use
   `Action Status`; `Cadence` identifies Call/SMS work; `Cadence Status` records the result.
 - Sheet DOB input is now documented and validated as `DD/MM/YYYY`, then normalized to ISO for the API.
-  Single-word names are accepted, and arbitrary non-empty Title text is accepted by the Sheet API.
+  Single-word names are accepted, and arbitrary non-empty Case text is accepted by the Sheet API.
 - No schema change was made. Because `leads.lead_type` still permits only Physical Therapy or Wellness,
-  arbitrary Title text remains Sheet-only until a separate database change is approved.
+  arbitrary Case text remains Sheet-only until a separate database change is approved.
 - Updated the three n8n imports, backend snapshot contract, tests, and root integration plan. Provider traffic,
   external workflow activation, database migration, commit, and push were not performed.
 - Validation: workflow JSON/node/connection checks and JavaScript compilation passed; focused integration and
@@ -1606,3 +1606,9 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - Final review fixed retrying a completed cadence, blocked restart for booked/DNC/known-wrong-number leads,
   preserved the booking-link call outcome, routed Sheet updates with the newest completed action request,
   and made profile sync use the configured intake key ID.
+
+### 2026-09-26 - Sheet Case column rename
+
+- Renamed the Google Sheet input contract from `Title` to `Case` in intake, recovery, profile-sync workflows,
+  and integration documentation. The API continues storing this value in `leads.lead_type`, so no database
+  migration is required.
