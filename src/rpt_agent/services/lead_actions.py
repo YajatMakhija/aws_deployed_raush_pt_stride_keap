@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 from ..config import get_settings
 from ..db import transaction
 from ..worker import format_phone, materialize_cadence
-from .review import hand_over_number
+from .review import flag_lead_for_review, hand_over_number
 from .sheet_sync import enqueue_sheet_update
 
 TERMINAL_START_STATUSES = {
@@ -639,6 +639,7 @@ def sync_sheet_lead(
                     "created": False,
                 },
             )
+        flag_lead_for_review(conn, str(lead_id), "Phone number changed; needs review")
         return ActionExecution(
             409,
             {

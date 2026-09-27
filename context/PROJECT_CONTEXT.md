@@ -1612,3 +1612,9 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - Renamed the Google Sheet input contract from `Title` to `Case` in intake, recovery, profile-sync workflows,
   and integration documentation. The API continues storing this value in `leads.lead_type`, so no database
   migration is required.
+
+### 2026-09-27 - Linked Sheet phone-change guard
+
+- Changing a linked Sheet row's phone keeps the stored phone and Lead ID, pauses remaining outreach, and flags both the database
+  and Sheet `Needs Review` fields. Only the profile-sync n8n workflow handles this Sheet edit.
+- Validation: `194 passed, 3 skipped`; Ruff, workflow JSON parsing, Compose configuration, and diff checks passed.

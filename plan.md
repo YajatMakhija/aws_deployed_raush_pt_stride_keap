@@ -376,7 +376,7 @@ unavailable Google/n8n services never block calls, SMS, or provider callbacks.
 | n8n sends the same request again | Same Action Request ID/body returns the stored result |
 | AWS commits but response is lost | Recovery obtains the saved Lead ID/result |
 | Duplicate Sheet phone | Backend returns `lead_already_exists`; no old row is modified |
-| Linked row phone changed | Backend returns review status; DB phone/cadence stay unchanged |
+| Linked row phone changed | Backend keeps the original phone, pauses cadence, and flags DB + Sheet review |
 | Worker crash | Database leases/locks allow safe recovery |
 | Two cadence workers | Advisory lock permits only one dispatcher |
 | Vapi/Twilio sends duplicate callback | Provider IDs and database constraints make processing idempotent |

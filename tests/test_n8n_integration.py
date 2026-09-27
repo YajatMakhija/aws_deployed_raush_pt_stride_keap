@@ -279,6 +279,8 @@ def test_sheet_sync_same_phone_updates_existing_lead(monkeypatch):
 
 
 def test_sheet_sync_changed_phone_requires_review(monkeypatch):
+    queries = []
+
     class _Rows:
         def __init__(self, row):
             self.row = row
@@ -286,12 +288,18 @@ def test_sheet_sync_changed_phone_requires_review(monkeypatch):
         def fetchone(self):
             return self.row
 
+        def fetchall(self):
+            return []
+
     class Connection:
         def execute(self, query, params=None):
             normalized = " ".join(query.split())
+            queries.append(normalized)
             if normalized.startswith("select id from practices"):
                 return _Rows({"id": 7})
-            return _Rows({"id": params[0], "phone_e164": "+15555550100"})
+            if normalized.startswith("select id,phone_e164 from leads"):
+                return _Rows({"id": params[0], "phone_e164": "+15555550100"})
+            return _Rows(None)
 
     @contextmanager
     def fake_transaction():
@@ -313,6 +321,8 @@ def test_sheet_sync_changed_phone_requires_review(monkeypatch):
     assert result.status_code == 409
     assert result.body["result"] == "phone_changed_needs_review"
     assert result.body["lead_id"] == str(old_id)
+    assert any("update leads set needs_review=true" in query for query in queries)
+    assert any("update outreach_events set status='skipped'" in query for query in queries)
 
 
 def test_n8n_route_rejects_bad_or_stale_signature(monkeypatch):
@@ -982,6 +992,10 @@ def test_profile_sync_workflow_matches_the_database_lead_id():
     ] == "Sync Failed?"
     error_update = nodes["Write Sync Error by Lead ID"]["parameters"]
     assert error_update["columns"]["matchingColumns"] == ["Lead ID"]
+    assert error_update["columns"]["value"]["Needs Review"] == "={{ $json.needsReview }}"
+    prepare = nodes["Prepare Profile Sync Result"]["parameters"]["jsCode"]
+    assert "phone_changed_needs_review" in prepare
+    assert "Needs review: phone number changed" in prepare
 
 
 def test_n8n_intake_and_recovery_read_the_case_sheet_column():

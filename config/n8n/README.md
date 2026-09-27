@@ -87,8 +87,8 @@ POST {RPT_BACKEND_BASE_URL}/api/v1/integrations/n8n/lead-sync
 
 Create a separate Google trigger for `Name`, `Phone Number`, `Email`, `Date Of Birth`, `Location`, and `Case`.
 Send rows only when Lead ID exists. A same-phone response updates only the database and stops. A changed-phone
-response keeps the existing Lead ID and cadence unchanged; update only that triggering row's Action Status to
-`Phone number changed; needs review`. Reuse the intake HMAC key and signing logic.
+response keeps the existing Lead ID, pauses its cadence, and writes `Needs review: phone number changed` plus
+`Needs Review` to that row. Reuse the intake HMAC key and signing logic.
 
 AWS status-update webhook:
 

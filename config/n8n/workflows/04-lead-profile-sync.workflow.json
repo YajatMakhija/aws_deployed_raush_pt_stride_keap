@@ -71,7 +71,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const sources = $('Build and Sign Profile Sync').all().filter(item => item.json.valid);\nconst byRequest = new Map(sources.map(item => [String(item.json.requestId), item.json]));\nconst output = [];\nfor (const [index,item] of $input.all().entries()) {\n  const response = item.json;\n  const status = Number(response.statusCode || 0);\n  let body = response.body || {};\n  if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }\n  const source = byRequest.get(String(body.request_id || '')) || sources[index]?.json;\n  if (!source) throw new Error('Could not match AWS response to its Sheet row');\n  const success = status === 200 || status === 201;\n  const detail = typeof body.detail === 'string' ? body.detail : (body.code || response.error?.message || 'request rejected');\n  output.push({json:{...source,httpStatus:status,result:body.result || '',failed:!success,errorText:'Error: ' + String(detail).slice(0,180)},pairedItem:{item:index}});\n}\nreturn output;"
+        "jsCode": "const sources = $('Build and Sign Profile Sync').all().filter(item => item.json.valid);\nconst byRequest = new Map(sources.map(item => [String(item.json.requestId), item.json]));\nconst output = [];\nfor (const [index,item] of $input.all().entries()) {\n  const response = item.json;\n  const status = Number(response.statusCode || 0);\n  let body = response.body || {};\n  if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }\n  const source = byRequest.get(String(body.request_id || '')) || sources[index]?.json;\n  if (!source) throw new Error('Could not match AWS response to its Sheet row');\n  const success = status === 200 || status === 201;\n  const detail = typeof body.detail === 'string' ? body.detail : (body.code || response.error?.message || 'request rejected');\n  const phoneChanged = body.code === 'phone_changed_needs_review';\n  output.push({json:{...source,httpStatus:status,result:body.result || '',failed:!success,errorText:phoneChanged ? 'Needs review: phone number changed' : 'Error: ' + String(detail).slice(0,180),needsReview:phoneChanged ? 'Needs Review' : (source['Needs Review'] || '')},pairedItem:{item:index}});\n}\nreturn output;"
       },
       "id": "04-prepare-result",
       "name": "Prepare Profile Sync Result",
@@ -92,7 +92,7 @@
         "operation": "update",
         "documentId": {"__rl": true, "value": "1t7yhLwv_aOxsnWtfJsMigA62cJ3PfCFXNRu_EeVX_20", "mode": "list", "cachedResultName": "Copy of Lead_Sheet"},
         "sheetName": {"__rl": true, "value": 1286805801, "mode": "list", "cachedResultName": "Leads"},
-        "columns": {"mappingMode": "defineBelow", "value": {"Lead ID": "={{ $json.oldLeadId }}", "Action Status": "={{ $json.errorText }}"}, "matchingColumns": ["Lead ID"]},
+        "columns": {"mappingMode": "defineBelow", "value": {"Lead ID": "={{ $json.oldLeadId }}", "Action Status": "={{ $json.errorText }}", "Needs Review": "={{ $json.needsReview }}"}, "matchingColumns": ["Lead ID"]},
         "options": {}
       },
       "id": "04-write-error",
