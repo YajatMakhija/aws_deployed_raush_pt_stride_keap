@@ -493,7 +493,19 @@ def test_do_not_contact_is_left_alone_until_the_client_picks_a_tag(chain):
     assert response.status_code in (200, 201), response.text
     chain.keap_tick()
     assert chain.dashboard(lead)["status"] == "do_not_contact"
-    assert chain.tags(chain.contact(lead)) == {PENDING}  # E-14: open decision
+    # Already in Keap: frozen, so its tags stay exactly as they were (no new writes).
+    assert chain.tags(chain.contact(lead)) == {PENDING}
+
+
+def test_a_lead_marked_do_not_contact_before_its_first_sync_never_reaches_keap(chain):
+    lead = chain.sheet_lead("Never", f"Chain{chain.run}", email=f"never.{chain.run}@example.test")
+    response = chain.sheet("do_not_contact", lead_id=lead, **chain.lead_data(lead))
+    assert response.status_code in (200, 201), response.text
+    writes_before = chain.writes()
+    chain.keap_tick()
+    assert chain.contact(lead) is None
+    assert chain.writes() == writes_before
+    assert "kept out of Keap" in (chain.row_of(lead)["skip_reason"] or "")
 
 
 def test_a_finished_cadence_swaps_pending_for_ai_gave_up(chain):

@@ -32,6 +32,7 @@ SERVICE = "keap-worker"
 KEAP_WORKER_LOCK_ID = 7_272_054_120
 STUCK_AFTER = "15 minutes"
 FULL_PLAN_EVERY_SECONDS = 3600
+SWITCHED_OFF_HEARTBEAT_SECONDS = 300
 
 _state: dict[str, Any] = {"last_full": None, "client": None, "stats_day": None}
 
@@ -192,6 +193,13 @@ def main() -> None:
         "keap_worker_started",
         extra={"event": "keap_worker_started", "details": {"enabled": settings.keap_sync_enabled}},
     )
+    if not settings.keap_sync_enabled:
+        # Switched off: hold no lock and no connection between heartbeats. Supabase's session
+        # pooler allows 15 clients for every container together (review of PR #13, 2026-10-14);
+        # the pool closes the heartbeat's connection after DB_POOL_MAX_IDLE_SECONDS.
+        while True:
+            write_heartbeat(enabled=False, state="switched_off")
+            time.sleep(SWITCHED_OFF_HEARTBEAT_SECONDS)
     with keap_worker_lock(settings.supabase_db_url, settings.db_pool_timeout_seconds):
         while True:
             started = time.monotonic()

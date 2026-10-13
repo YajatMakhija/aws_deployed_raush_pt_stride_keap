@@ -201,8 +201,16 @@ def test_ended_cadence_swaps_pending_for_the_gave_up_tag():
     assert run(lead(status="declined")).desired["tags"] == [GAVE_UP]
 
 
-def test_do_not_contact_is_left_on_pending_until_the_client_decides():
-    assert run(lead(status="do_not_contact")).desired["tags"] == [PENDING]
+def test_do_not_contact_or_wrong_number_never_reaches_keap():
+    # A Pending tag in Keap can start marketing emails/texts to someone who asked us to stop.
+    for status in ("do_not_contact", "invalid_phone"):
+        built = run(lead(status=status))
+        assert built.desired is None and "kept out of Keap" in built.skip_reason
+
+
+def test_do_not_contact_already_in_keap_is_left_exactly_as_it_is():
+    built = run(lead(status="do_not_contact"), synced_before=True)
+    assert built.freeze and built.desired is None
 
 
 def test_ended_lead_that_booked_in_stride_is_booked_not_gave_up():

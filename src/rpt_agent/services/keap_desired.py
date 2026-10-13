@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import psycopg
+
 from ..config import get_settings
 from .stride_import import CANCELLED_STATUSES
 
@@ -28,6 +30,9 @@ CHECKED_IN_STATUSES = {"checked in", "c"}
 # invalid phone and transferred-to-human are deliberately NOT here: the client has
 # not chosen their Keap tags yet, so those people are left unchanged.
 ENDED_LEAD_STATUSES = {"closed_no_response", "declined"}
+# People who asked us to stop, or whose number is wrong, never go to Keap: a Pending tag there can
+# start marketing emails or texts. Already in Keap -> left exactly as it is (spec 0.4 / R4).
+KEEP_OUT_LEAD_STATUSES = {"do_not_contact", "invalid_phone"}
 # More than this many people queued in one tick is a bulk first load: patient-only
 # rows are spread out so new leads never wait behind the backlog.
 BULK_THRESHOLD = 200
@@ -162,6 +167,9 @@ def compute_desired(
         patient = None
     if lead is None and patient is None:
         return Built(skip_reason="no lead or patient left")
+    if lead is not None and lead.get("status") in KEEP_OUT_LEAD_STATUSES:
+        return Built(freeze=True) if synced_before else Built(
+            skip_reason="do not contact / wrong number: kept out of Keap")
 
     # --- contact: Stride wins, except the phone (the lead's is the one we call) ---
     lead = lead or {}
@@ -315,6 +323,32 @@ def mask_desired(desired: dict[str, Any]) -> dict[str, Any]:
 # --- attach people ----------------------------------------------------------
 
 
+def _link_pair(conn, pair, counts: dict[str, int]) -> None:
+    """Give a linked Stride patient to its lead's keap_sync row (merge or flag duplicates)."""
+    if pair["pat_row"] is None:
+        conn.execute(
+            "update keap_sync set stride_patient_id=%s where id=%s", (pair["pid"], pair["lead_row"])
+        )
+        return
+    lead_contact, pat_contact = pair["lead_contact"], pair["pat_contact"]
+    if lead_contact and pat_contact and lead_contact != pat_contact:
+        if pair["lead_status"] != "needs_review" or pair["pat_status"] != "needs_review":
+            conn.execute(
+                "update keap_sync set status='needs_review',"
+                "last_error='duplicate Keap contacts for one person' where id=any(%s)",
+                ([pair["lead_row"], pair["pat_row"]],),
+            )
+            counts["duplicates"] += 1
+        return
+    conn.execute("delete from keap_sync where id=%s", (pair["pat_row"],))
+    conn.execute(
+        "update keap_sync set stride_patient_id=%s,keap_contact_id=coalesce(keap_contact_id,%s) "
+        "where id=%s",
+        (pair["pid"], pat_contact, pair["lead_row"]),
+    )
+    counts["merged"] += 1
+
+
 def attach_people(conn, practice_id: int) -> dict[str, int]:
     """Make sure every in-scope person has exactly one keap_sync row."""
     settings = load_settings(conn, practice_id)
@@ -341,28 +375,18 @@ def attach_people(conn, practice_id: int) -> dict[str, int]:
         (practice_id,),
     ).fetchall()
     for pair in pairs:
-        if pair["pat_row"] is None:
+        # One savepoint per person: a link that breaks a unique index (e.g. one lead tied to
+        # two patients) must flag that row, not fail the whole planning tick every minute
+        # (review of PR #13, 2026-10-14).
+        try:
+            with conn.transaction():
+                _link_pair(conn, pair, counts)
+        except psycopg.errors.UniqueViolation:
             conn.execute(
-                "update keap_sync set stride_patient_id=%s where id=%s", (pair["pid"], pair["lead_row"])
+                "update keap_sync set status='needs_review',last_error=%s where id=%s",
+                ("could not link this person's Stride patient (duplicate link)", pair["lead_row"]),
             )
-            continue
-        lead_contact, pat_contact = pair["lead_contact"], pair["pat_contact"]
-        if lead_contact and pat_contact and lead_contact != pat_contact:
-            if pair["lead_status"] != "needs_review" or pair["pat_status"] != "needs_review":
-                conn.execute(
-                    "update keap_sync set status='needs_review',"
-                    "last_error='duplicate Keap contacts for one person' where id=any(%s)",
-                    ([pair["lead_row"], pair["pat_row"]],),
-                )
-                counts["duplicates"] += 1
-            continue
-        conn.execute("delete from keap_sync where id=%s", (pair["pat_row"],))
-        conn.execute(
-            "update keap_sync set stride_patient_id=%s,keap_contact_id=coalesce(keap_contact_id,%s) "
-            "where id=%s",
-            (pair["pid"], pat_contact, pair["lead_row"]),
-        )
-        counts["merged"] += 1
+            counts["link_conflicts"] = counts.get("link_conflicts", 0) + 1
 
     if settings.get("keap_sync_start_at") is not None:
         counts["patients_added"] = conn.execute(

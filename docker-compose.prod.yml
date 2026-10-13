@@ -58,6 +58,9 @@ services:
     mem_limit: 256m
     env_file: .env
     command: rpt-keap-worker
+    # One pooled connection is plenty; the advisory lock holds a second while sync is on.
+    environment:
+      DB_POOL_MAX_SIZE: "1"
     volumes:
       - ./logs:/app/logs
 

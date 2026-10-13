@@ -297,10 +297,12 @@ def keap_sync_once(args) -> None:
 
 
 def keap_retry_failed() -> None:
+    """Retry this practice's failed Keap rows (never another practice's)."""
     with transaction() as conn:
         n = conn.execute(
             "update keap_sync set status='pending',attempts=0,next_attempt_at=now(),last_error=null "
-            "where status='failed'"
+            "where status='failed' and practice_id=(select id from practices where slug=%s)",
+            (get_settings().stride_practice_slug,),
         ).rowcount
     print(json.dumps({"reset": n}))
 

@@ -45,8 +45,7 @@ def oauth_callback(code: str = "", state: str = "", error: str = ""):
     if error or not code:
         return _page("Keap did not approve the connection. Start again.", 400)
     try:
-        account = None
-        keap_oauth.exchange_code(practice_id, code, keap_account=account)
+        keap_oauth.exchange_code(practice_id, code, keap_account=None)
     except KeapAuthError:
         return _page("Keap rejected the connection. Check the app credentials and try again.", 400)
     except (ConnectionError, httpx.HTTPError):

@@ -38,6 +38,9 @@ services:
       - path: .env
         required: false
     command: rpt-keap-worker
+    # One pooled connection is plenty; the advisory lock holds a second while sync is on.
+    environment:
+      DB_POOL_MAX_SIZE: "1"
     volumes:
       - ./src:/app/src
       - ./logs:/app/logs

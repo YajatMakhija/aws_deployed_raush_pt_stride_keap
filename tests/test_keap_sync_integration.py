@@ -588,3 +588,68 @@ def test_logs_never_contain_personal_data_or_tokens(env, caplog):
     text = caplog.text
     for secret in ("secret.person", "5555550101", "access-0", "refresh-0", "Asha"):
         assert secret not in text
+
+
+
+def test_retried_requests_count_against_the_keap_budget():
+    # The shared HTTP layer retries a failing call up to HTTP_RETRY_ATTEMPTS times; every one of
+    # those is a real request Keap counts, so our limiter must count it too (PR #13 review).
+    from rpt_agent.config import get_settings
+    from rpt_agent.observability import WorkflowTrace
+
+    calls = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(503 if len(calls) < 3 else 200, json={"contacts": []})
+
+    limiter = RateLimiter(100, 1000, clock=lambda: 0.0, sleep=lambda _: None, today=lambda: "d")
+    client = KeapClient(1, get_settings(), httpx.Client(transport=httpx.MockTransport(flaky)),
+                        limiter=limiter, audit_enabled=False)
+    KeapClient(1, get_settings(), client.client, limiter=limiter, audit_enabled=False)  # no double hook
+    import rpt_agent.services.keap_client as module
+    original = module.keap_oauth.access_token
+    module.keap_oauth.access_token = lambda *a, **k: "token"
+    try:
+        client._call(WorkflowTrace("t", "test"), "GET", "/contacts", operation="list", idempotent=True)
+    finally:
+        module.keap_oauth.access_token = original
+    assert len(calls) == 3
+    assert limiter.used_today == 3
+
+
+def test_one_person_that_cannot_be_linked_does_not_stop_planning_for_everyone(env, monkeypatch):
+    # PR #13 review: linking ran outside the per-row savepoint, so one unique-index clash failed
+    # the whole planning step on every tick. Now that person is flagged and the rest carry on.
+    import psycopg
+
+    first, second = env.lead("Clash One", email="one@example.test"), env.lead(
+        "Fine Two", email="two@example.test", phone="+15555550102")
+    env.plan()
+    env.book(first), env.book(second)
+    clash_row = env.row(first)["id"]
+    original = keap_desired._link_pair
+
+    def link(conn, pair, counts):
+        if pair["lead_row"] == clash_row:
+            raise psycopg.errors.UniqueViolation("simulated duplicate link")
+        return original(conn, pair, counts)
+
+    monkeypatch.setattr(keap_desired, "_link_pair", link)
+    env.plan()  # must not raise
+    flagged, fine = env.row(first), env.row(second)
+    assert flagged["status"] == "needs_review" and "could not link" in flagged["last_error"]
+    assert fine["stride_patient_id"] is not None
+
+
+def test_an_email_that_would_change_keaps_search_filter_never_matches():
+    from rpt_agent.config import get_settings
+    from rpt_agent.observability import WorkflowTrace
+
+    def no_http(request):
+        raise AssertionError("must not call Keap")
+
+    client = KeapClient(1, get_settings(), httpx.Client(transport=httpx.MockTransport(no_http)),
+                        audit_enabled=False)
+    for bad in ("a@b.test;given_name==X", "a@b.test,c@d.test", "a b@c.test", ""):
+        assert client.find_by_email(WorkflowTrace("t", "test"), bad) == []

@@ -114,6 +114,19 @@ class KeapClient(ProviderService):
         )
         self.stats = {"created": 0, "updated": 0, "tags_applied": 0, "tags_removed": 0}
         self._model: tuple[float, dict[str, str]] | None = None
+        # Count every HTTP request that actually goes out, including the shared layer's automatic
+        # retries (up to HTTP_RETRY_ATTEMPTS per call), so Keap's per-minute and per-day limits are
+        # never quietly exceeded (review of PR #13, 2026-10-14). One hook per httpx client.
+        limiter = self.limiter
+
+        def count_request(_request: httpx.Request) -> None:
+            limiter.acquire()
+
+        count_request.keap_limiter = True  # type: ignore[attr-defined]
+        hooks = dict(self.client.event_hooks)
+        hooks["request"] = [h for h in hooks.get("request", []) if not getattr(h, "keap_limiter", False)]
+        hooks["request"].append(count_request)
+        self.client.event_hooks = hooks
 
     # --- plumbing ---------------------------------------------------------
 
@@ -131,7 +144,6 @@ class KeapClient(ProviderService):
         url = self.settings.keap_api_base_url.rstrip("/") + path
         token = keap_oauth.access_token(self.practice_id, client=self.client, settings=self.settings)
         for attempt in (1, 2):
-            self.limiter.acquire()
             response = self._request(
                 trace, "keap", method, url,
                 operation=operation, idempotent=idempotent, params=params, json=json,
@@ -193,6 +205,10 @@ class KeapClient(ProviderService):
         return list(body.get("contacts") or [])
 
     def find_by_email(self, trace: WorkflowTrace, email: str) -> list[dict[str, Any]]:
+        # Keap's filter language uses ';' (and), ',' (or) and '=='; an address containing them is
+        # not a real email and would change the search, so it never matches anyone.
+        if not email or any(ch in email for ch in ";,= \t"):
+            return []
         return self._search(trace, f"email=={email}", "find_by_email")
 
     def find_by_phone(self, trace: WorkflowTrace, number: str) -> list[dict[str, Any]]:
