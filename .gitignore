@@ -71,3 +71,6 @@ scratch/
 # Local fake SFTP / Stride drops (synthetic CSVs, dev keys)
 local/
 scripts/voice_tests/results/
+
+# MCP client config can hold API tokens
+.mcp.json

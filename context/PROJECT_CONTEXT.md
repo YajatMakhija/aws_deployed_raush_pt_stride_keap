@@ -1616,7 +1616,7 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - This batch had USD 1.2480 in provider-reported cost at the final workflow check: USD 1.2480 Twilio and
   USD 0.0000 Vapi, with six delivered Twilio messages still awaiting a settled API price. Cumulative confirmed
   project-test spend was USD 1.8860 plus those six pending prices when the client report was refreshed.
-- Rebuilt `testing_updates/CLIENT_TEST_USAGE.md` and added a masked per-recipient breakdown.
+- Rebuilt `docs/CLIENT_TEST_USAGE.md` (moved from `testing_updates/` on 2026-10-14) and added a masked per-recipient breakdown.
 
 ### 2026-08-25 — Second Ponytail over-engineering audit and cleanup
 
@@ -1637,7 +1637,7 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   lead reference to null. The full recipient stays protected in Supabase; the generated Markdown uses only
   last four digits plus a stable HMAC fingerprint.
 - Added `scripts/generate_test_usage_report.py`, which refreshes statuses and costs from provider APIs and
-  writes the client-shareable `testing_updates/CLIENT_TEST_USAGE.md`.
+  writes the client-shareable `docs/CLIENT_TEST_USAGE.md` (moved from `testing_updates/` on 2026-10-14).
 - Backfilled seven real operations already incurred during the current test session. At the report snapshot,
   provider-reported spend was USD 0.4716 across four Vapi calls and three Twilio SMS messages.
 - Validation: `34 passed, 3 skipped`; Ruff passed. The worker was rebuilt with automatic tracking enabled.
@@ -1857,3 +1857,19 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - Demo setup: `rpt booking-demo-seed` (Stride demo locations 3169/3170, clinicians 5980-5982, type 1452)
   and `BOOKING_TODAY_OVERRIDE` because demo availability only exists 2026-05-15 to 2026-07-29.
 - Tests: 24 integration tests on a real Postgres schema (`tests/test_slot_booking_integration.py`).
+
+### 2026-10-14 — Stride test-round fixes and repo tidy-up
+
+- Tester bugs (13 Oct): a Stride Delete that matched two visits (Mock Stride allowed two visits in one
+  case at one time) left the lead Booked and hid later cancels. Now an unclear delete flags the lead
+  ("Unclear change in Stride"); a flagged lead is re-booked only by a visit changed after the flag;
+  Mock Stride refuses double bookings (unique index `appointments_one_per_case_slot`).
+- Start cadence for the same person (phone + name + birthday) already booked returns `already_booked`
+  (no lead, no calls). Repeat patients still start a new referral.
+- n8n intake filter: skip any Outcome Status that contains "needs review" (the profile sync writes
+  "Phone number changed; needs review", which re-sent a stale Booked action); label `already_booked`.
+- `scripts/stride_check.py` shows one lead's status, Stride visits, import issues and Sheet updates.
+- Tidy-up: removed the superseded long booking prompt and the Windows `dev.ps1`; moved
+  `testing_updates/CLIENT_TEST_USAGE.md` to `docs/`; added `docs/README.md`; folder CLAUDE.md guides and
+  the Keap phase docs are now in git; `.mcp.json` is ignored (it can hold tokens).
+
