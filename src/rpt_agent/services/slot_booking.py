@@ -618,6 +618,35 @@ def _close_attempt(appointment_id: int, hold_id: int, *, state: str, error: str,
             )
 
 
+# Who booked: the voice agent on a call, or staff from the dashboard calendar. It is stored on the
+# appointment and in the lead's history, so reports can tell them apart.
+BOOKING_SOURCES = {"voice_agent": ("voice_booking", "voice booking"),
+                   "staff": ("staff_booking", "staff booking")}
+
+
+def _booked_elsewhere(conn, lead_id: str) -> str | None:
+    """A lead booked from Stride or the Sheet has no row in `appointments`; still never book twice.
+
+    Without this a staff (calendar) or voice booking made a second real Stride appointment for a
+    lead the Stride import had already marked booked (found in the PR #14 review, 2026-10-14).
+    """
+    row = conn.execute(
+        "select l.status,(select min(s.start_utc) from stride_patients p join stride_appointments s "
+        " on s.practice_id=p.practice_id and s.patient_stride_id=p.stride_id and s.deleted_at is null "
+        " and s.start_utc>now() and lower(coalesce(s.status,'')) not in "
+        " ('cancel','cancelled','late cancel','no show','a','l','n') where p.lead_id=l.id) as next_visit "
+        "from leads l where l.id=%s",
+        (lead_id,),
+    ).fetchone()
+    if not row:
+        return None
+    if row["next_visit"] is not None:
+        return "an upcoming appointment in Stride"
+    if row["status"] == "booked":
+        return "a booking on record"
+    return None
+
+
 def _flag(lead_id: str, reason: str) -> None:
     with transaction() as conn:
         flag_lead_for_review(conn, lead_id, reason)
@@ -631,7 +660,9 @@ def book_slot(
     arguments: dict[str, Any],
     settings: Settings | None = None,
     providers: ProviderClients | None = None,
+    source: str = "voice_agent",
 ) -> str:
+    history_source, label = BOOKING_SOURCES[source]
     settings = settings or get_settings()
     providers = providers or _fast_providers(settings)
     deadline = _Deadline(settings)
@@ -642,6 +673,10 @@ def book_slot(
     wanted_date = date.fromisoformat(raw_date)
     wanted_time = parse_clock(str(arguments.get("time") or ""))
     clinician_name = str(arguments.get("clinician_name") or "").strip() or None
+    raw_slot = arguments.get("slot_id")
+    if raw_slot not in (None, "") and not str(raw_slot).isdigit():
+        raise ValueError("BAD_SLOT: the slot id must be a number.")
+    slot_id = int(raw_slot) if raw_slot not in (None, "") else None
 
     with transaction() as conn:
         context = load_context(conn, lead_id, location_name=arguments.get("location"),
@@ -664,8 +699,11 @@ def book_slot(
                 "UNCONFIRMED: an earlier booking for this patient needs staff to confirm it. "
                 "Tell the caller our team will confirm their appointment by text."
             )
+        elsewhere = _booked_elsewhere(conn, lead_id)
+        if elsewhere:
+            return f"ALREADY_BOOKED: this patient already has {elsewhere}. Do not book again."
         slot = _find_slot_for_booking(conn, context, call_key, wanted_date, wanted_time,
-                                      clinician_name, slot_id=arguments.get("slot_id"))
+                                      clinician_name, slot_id=slot_id)
     if slot is None:
         return (
             f"NOT_AVAILABLE: {_spoken_time(wanted_time)} on {_spoken_date(wanted_date)} is not "
@@ -713,9 +751,9 @@ def book_slot(
                     "insert into appointments(lead_id,practice_id,booking_source,state,booking_key,"
                     "slot_id,slot_hold_id,case_type_id,booking_location_id,call_id,clinician_id,"
                     "location_id,appointment_type_id,start_utc,end_utc) "
-                    "values(%s,%s,'voice_agent','booking',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "values(%s,%s,%s,'booking',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "on conflict do nothing returning id",
-                    (lead_id, context.lead["practice_id"], booking_key, *values,
+                    (lead_id, context.lead["practice_id"], source, booking_key, *values,
                      slot["start_utc"], slot["end_utc"]),
                 ).fetchone()
                 if not created:
@@ -862,7 +900,7 @@ def book_slot(
         detail = str(exc).lower()
         if exc.ambiguous:
             give_up("unknown", f"{stage}: {exc}")
-            _flag(lead_id, f"Stride {stage} result unclear during voice booking; confirm in Stride")
+            _flag(lead_id, f"Stride {stage} result unclear during {label}; confirm in Stride")
             trace.log("booking_unknown", stage=stage)
             return (
                 "UNCONFIRMED: the booking system did not answer clearly. Do not try again. Tell "
@@ -886,7 +924,7 @@ def book_slot(
         return team_follow_up
     except Exception as exc:  # noqa: BLE001 - Stride may have saved something
         give_up("unknown", f"{stage}: unexpected {type(exc).__name__}")
-        _flag(lead_id, "Unexpected error during voice booking; confirm in Stride")
+        _flag(lead_id, f"Unexpected error during {label}; confirm in Stride")
         return (
             "UNCONFIRMED: something went wrong while booking. Do not try again. Tell the caller "
             "our team will confirm their appointment by text."
@@ -896,7 +934,8 @@ def book_slot(
     raw_event = str(arguments.get("outreach_event_id") or "").strip()
     _finish_booking(trace, context, slot, appointment_id, hold_id, stride_appointment_id,
                     patient_id, case_id, patient,
-                    event_id=int(raw_event) if raw_event.isdigit() else None)
+                    event_id=int(raw_event) if raw_event.isdigit() else None,
+                    history_source=history_source)
     duration = context.case_type["duration_minutes"]
     return (
         f"BOOKED: {_spoken_date(slot['local_date'])} at {_spoken_time(slot['local_time'])} with "
@@ -909,7 +948,7 @@ def book_slot(
 def _finish_booking(
     trace: WorkflowTrace, context: BookingContext, slot: dict[str, Any], appointment_id: int,
     hold_id: int, stride_appointment_id: int, patient_id: int, case_id: int, patient: Patient,
-    *, event_id: int | None = None,
+    *, event_id: int | None = None, history_source: str = "voice_booking",
 ) -> None:
     lead = context.lead
     lead_id = str(lead["id"])
@@ -925,7 +964,7 @@ def _finish_booking(
                          "where id=%s", (slot["id"],))
             conn.execute("update leads set stride_patient_id=%s,stride_case_id=%s where id=%s",
                          (patient_id, case_id, lead_id))
-            mark_booked(conn, lead_id, "voice_booking")
+            mark_booked(conn, lead_id, history_source)
             if event_id is not None:
                 # Settle this call as booked now, so a later end-of-call summary
                 # that reads it differently cannot undo the booking.

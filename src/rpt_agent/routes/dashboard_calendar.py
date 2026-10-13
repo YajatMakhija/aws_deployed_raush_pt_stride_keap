@@ -209,6 +209,9 @@ def create_calendar_appointment(payload: CalendarBooking, actor: Actor):
         if (blocked or lead["status"] == "do_not_contact"
                 or (lead["call_opt_out"] and lead["sms_opt_out"]) or lead["needs_review"]):
             raise HTTPException(409, "Resolve the lead's contact restrictions or review before booking.")
+        if lead["status"] == "booked":
+            # The booking engine refuses too (it also sees Stride visits); answer early and plainly.
+            raise HTTPException(409, _STAFF_MESSAGES["ALREADY_BOOKED"])
         if not lead["first_name"] or not lead["last_name"] or not lead["date_of_birth"]:
             raise HTTPException(400, "The lead needs a first name, last name and date of birth to book.")
         slot = conn.execute(
@@ -223,6 +226,7 @@ def create_calendar_appointment(payload: CalendarBooking, actor: Actor):
     try:
         result = slot_booking.book_slot(
             WorkflowTrace("dashboard_booking", "api"), lead_id=str(payload.lead_id), call_id=None,
+            source="staff",
             arguments={
                 "date": slot["local_date"].isoformat(), "time": slot["local_time"].isoformat(),
                 "clinician_name": slot["display_name"], "first_name": lead["first_name"],
@@ -230,13 +234,17 @@ def create_calendar_appointment(payload: CalendarBooking, actor: Actor):
                 "email": lead["email"], "slot_id": payload.slot_id,
             },
         )
-    except (ValueError, slot_booking.BookingToolError):
-        raise HTTPException(409, "The appointment could not be booked. Review the lead and availability.") from None
-    if not result.startswith(("BOOKED:", "ALREADY_BOOKED:", "BOOKED_SYNC_PENDING:")):
-        message = ("The booking needs staff confirmation. Do not book again."
-                   if result.startswith(("UNCONFIRMED:", "IN_PROGRESS:"))
-                   else "That time could not be booked. Check availability or ask staff to review.")
-        raise HTTPException(409, message)
+    except ValueError as exc:
+        # Validation of the lead's own details (name, birthday, email): tell staff what to fix.
+        _booking_outcome(actor, payload, "rejected", str(exc).split(":", 1)[0])
+        raise HTTPException(400, _staff_message(str(exc))) from None
+    except slot_booking.BookingToolError:
+        _booking_outcome(actor, payload, "rejected", "BOOKING_UNAVAILABLE")
+        raise HTTPException(409, "New bookings are currently switched off for this practice.") from None
+    code = result.split(":", 1)[0]
+    _booking_outcome(actor, payload, "booked" if code == "BOOKED" else "refused", code)
+    if code != "BOOKED":
+        raise HTTPException(409, _staff_message(result))
     with transaction() as conn:
         saved = conn.execute(
             "select id,state,start_utc,stride_appointment_id from appointments "
@@ -251,3 +259,35 @@ def create_calendar_appointment(payload: CalendarBooking, actor: Actor):
         "start_day": (saved["start_utc"].astimezone(ZoneInfo(slot["timezone"])).date()
                       if saved and saved["start_utc"] else slot["local_date"]),
     }
+
+
+# What staff see when a booking does not go through. The booking engine's replies are written for
+# the voice agent ("tell the caller ..."), so the dashboard needs its own words.
+_STAFF_MESSAGES = {
+    "ALREADY_BOOKED": "This patient is already booked, so no new appointment was made.",
+    "IN_PROGRESS": "A booking for this patient is already being made. Wait a minute and refresh.",
+    "UNCONFIRMED": "Stride did not answer clearly. The lead is flagged; check Stride before booking again.",
+    "PATIENT_EXISTS": "This patient already exists in Stride, so book them in Stride directly. "
+                      "The lead is flagged for review.",
+    "TAKEN": "That time was just taken in Stride. Pick another time.",
+    "NOT_AVAILABLE": "That time is no longer open. Pick another time.",
+    "FOLLOW_UP": "The booking could not be finished in time. Check Stride before trying again.",
+    "BAD_SLOT": "That appointment time is not valid. Refresh and pick a time again.",
+    "MISSING_NAME": "The lead needs a first and last name to book.",
+    "BAD_NAME": "The lead's name is too long for Stride. Shorten it on the lead first.",
+    "BAD_DATE_OF_BIRTH": "The lead's date of birth is not valid. Fix it on the lead first.",
+    "BAD_EMAIL": "The lead's email address is not valid. Fix or remove it on the lead first.",
+}
+
+
+def _staff_message(result: str) -> str:
+    code = result.split(":", 1)[0].strip()
+    return _STAFF_MESSAGES.get(code, "That time could not be booked. Check availability or ask staff to review.")
+
+
+def _booking_outcome(actor, payload: "CalendarBooking", outcome: str, code: str) -> None:
+    """Audit what happened, not only that a booking was asked for (no patient data)."""
+    with transaction() as conn:
+        _audit(conn, actor, actor.practice_id, f"appointment.booking_{outcome}", "lead",
+               str(payload.lead_id), {"slot_id": payload.slot_id, "result": code})
+

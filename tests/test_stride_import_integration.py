@@ -982,3 +982,33 @@ def test_same_person_added_twice_links_the_newest_lead(env):
     assert counts["leads_linked"] == 1 and counts["leads_ambiguous"] == 0
     assert env.one("select status from leads where id=%s", newer)["status"] == "booked"
     assert env.one("select stride_patient_id from leads where id=%s", older)["stride_patient_id"] is None
+
+
+
+# --- the booking engine never books someone who is already booked ---------------
+
+
+def test_booking_engine_sees_a_stride_booking_that_has_no_appointment_row(env):
+    # PR #14 review: a lead booked from the Stride import (or the Sheet) has no row in `appointments`,
+    # so staff (calendar) and voice bookings could make a second real Stride appointment.
+    from rpt_agent.services.slot_booking import _booked_elsewhere
+
+    lead = env.lead("Already There")
+    _import_patient_with_appointment(env, first="Already", last="There")
+    assert _booked_elsewhere(env.db, str(lead)) == "an upcoming appointment in Stride"
+
+
+def test_booking_engine_respects_a_booking_made_in_the_sheet(env):
+    from rpt_agent.services.slot_booking import _booked_elsewhere
+
+    lead = env.lead("Sheet Only", status="booked")
+    assert _booked_elsewhere(env.db, str(lead)) == "a booking on record"
+
+
+def test_booking_engine_allows_a_lead_whose_stride_visit_was_cancelled_or_missed(env):
+    from rpt_agent.services.slot_booking import _booked_elsewhere
+
+    lead, _ = _book_then_change(env, "Free Again", status="No Show")
+    assert env.one("select status from leads where id=%s", lead)["status"] == "needs_attention"
+    assert _booked_elsewhere(env.db, str(lead)) is None
+    assert _booked_elsewhere(env.db, str(env.lead("Never Booked", phone="+15552010009"))) is None
