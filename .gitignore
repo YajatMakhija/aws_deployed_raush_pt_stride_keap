@@ -70,3 +70,4 @@ scratch/
 
 # Local fake SFTP / Stride drops (synthetic CSVs, dev keys)
 local/
+scripts/voice_tests/results/
