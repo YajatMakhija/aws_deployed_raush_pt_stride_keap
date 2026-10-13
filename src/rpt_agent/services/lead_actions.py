@@ -139,6 +139,32 @@ def _update_lead_profile(conn, lead_id: str | UUID, lead_data: dict[str, Any]) -
     )
 
 
+def _same_person_already_booked(conn, practice_id: int, phone: str, lead_data: dict[str, Any]):
+    """The same patient (phone + name + birthday) who is already booked must not be called again.
+
+    A repeat patient referred for another body region shares the number but is a new referral, and
+    starts a new lead (hand_over_number). Only an exact repeat of a booked person is refused: seen in
+    testing, a booked patient added to the Sheet again got a fresh cadence and was called.
+    "Booked" means a visit still ahead (ours or Stride's), or a booking made in the last 30 days when
+    no visit is on record (staff picked Booked in the Sheet).
+    """
+    name = " ".join(str(lead_data.get("full_name") or "").lower().split())
+    return conn.execute(
+        "select l.id from leads l where l.practice_id=%s and l.phone_e164=%s and l.status='booked' "
+        "and lower(regexp_replace(trim(l.full_name),'\\s+',' ','g'))=%s "
+        "and (l.date_of_birth is null or %s::date is null or l.date_of_birth=%s::date) "
+        "and (exists(select 1 from appointments a where a.lead_id=l.id and a.start_utc>now() "
+        "  and coalesce(a.state,'') not in ('cancelled','failed')) "
+        " or exists(select 1 from stride_patients p join stride_appointments s on s.practice_id=p.practice_id "
+        "  and s.patient_stride_id=p.stride_id and s.deleted_at is null and s.start_utc>now() "
+        "  and lower(coalesce(s.status,'')) not in ('cancel','cancelled','late cancel','no show','a','l','n') "
+        "  where p.lead_id=l.id) "
+        " or coalesce(l.status_changed_at,l.updated_at)>now()-interval '30 days') "
+        "order by l.status_changed_at desc limit 1",
+        (practice_id, phone, name, lead_data.get("date_of_birth"), lead_data.get("date_of_birth")),
+    ).fetchone()
+
+
 def _start_cadence(
     conn,
     *,
@@ -170,6 +196,16 @@ def _start_cadence(
                 "The phone number has not changed",
                 lead_id=str(replaces_lead_id),
             )
+    if not replaces_lead_id:
+        booked = _same_person_already_booked(conn, practice["id"], phone, lead_data)
+        if booked:
+            # No lead_id: the Sheet writes it into the row, and two rows with one Lead ID break every
+            # later Sheet update for that lead (the webhook needs exactly one matching row).
+            return ActionExecution(200, {
+                "request_id": str(request_id), "lead_id": None, "booked_lead_id": str(booked["id"]),
+                "action": "start_cadence", "result": "already_booked", "created": False,
+                "cadence_event_count": 0,
+            })
     first_name, last_name = _name_parts(str(lead_data["full_name"]).strip())
     stored_lead_type = str(
         lead_data.get("lead_type") or lead_data.get("title") or ""

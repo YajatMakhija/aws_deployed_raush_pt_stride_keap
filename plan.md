@@ -162,6 +162,7 @@ Main responses:
 | 200 | Existing linked lead action completed or idempotent retry returned |
 | 401 | Wrong shared secret |
 | 409 `lead_already_exists` | Blank-ID row uses a phone already present in the practice |
+| 200 `already_booked` | Blank-ID row is the same person (phone + name + birthday) as a lead already booked; no new lead, no calls, `lead_id` empty (Sheet shows `Already booked`) |
 | 409 `name_changed_needs_review` | Linked row's name differs from its database lead |
 | 409 `phone_changed_needs_review` | Linked row's phone differs from its database lead |
 | 409 `name_and_phone_changed_needs_review` | Both linked identity fields differ |

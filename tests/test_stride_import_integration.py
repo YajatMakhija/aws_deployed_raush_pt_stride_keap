@@ -868,3 +868,104 @@ def test_one_word_name_matches_by_phone_when_birthday_is_missing(env):
     lead = _one_word_lead(env, "devyansh", dob=None)
     _import_patient_with_appointment(env, first="Devyansh", last="Chaudhary")
     assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
+
+
+# --- the same booked person added to the Sheet again --------------------------
+
+
+def _sheet_start(env, name, dob="1990-01-01", phone="+15552010000"):
+    from uuid import uuid4
+
+    from rpt_agent.services.lead_actions import _start_cadence
+
+    return _start_cadence(env.db, request_id=uuid4(), practice={"id": env.practice_id, "timezone": "UTC"},
+                          lead_data={"phone": phone, "full_name": name, "email": None, "date_of_birth": dob,
+                                     "location": "Laguna Niguel", "lead_type": None})
+
+
+def test_booked_person_added_to_the_sheet_again_is_not_called_again(env):
+    lead = env.lead("Again Booked")
+    _import_patient_with_appointment(env, first="Again", last="Booked")
+    assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
+    before = env.one("select count(*) n from leads where practice_id=%s", env.practice_id)["n"]
+    result = _sheet_start(env, "again  BOOKED")  # spacing and case do not matter
+    assert (result.status_code, result.body["result"], result.body["booked_lead_id"]) == (
+        200, "already_booked", str(lead))
+    assert result.body["lead_id"] is None  # the new Sheet row must not get the booked lead's ID
+    assert env.one("select count(*) n from leads where practice_id=%s", env.practice_id)["n"] == before
+    assert env.one("select status,cadence_state from leads where id=%s", lead) == {
+        "status": "booked", "cadence_state": "completed"}
+
+
+def test_repeat_patient_with_another_birthday_is_a_new_referral(env):
+    from rpt_agent.services.lead_actions import _same_person_already_booked
+
+    env.lead("Family Member")
+    _import_patient_with_appointment(env, first="Family", last="Member")
+    lead_data = {"full_name": "Family Member", "date_of_birth": "1955-05-05"}
+    assert _same_person_already_booked(env.db, env.practice_id, "+15552010000", lead_data) is None
+
+
+def test_patient_whose_booking_is_long_past_can_be_referred_again(env):
+    from rpt_agent.services.lead_actions import _same_person_already_booked
+
+    lead = env.lead("Old Patient", status="booked")
+    env.db.execute("update leads set status_changed_at=now()-interval '90 days',updated_at=now()-interval '90 days' where id=%s", (lead,))
+    lead_data = {"full_name": "Old Patient", "date_of_birth": "1990-01-01"}
+    assert _same_person_already_booked(env.db, env.practice_id, "+15552010000", lead_data) is None
+
+
+def test_person_booked_from_the_sheet_recently_counts_as_booked(env):
+    from rpt_agent.services.lead_actions import _same_person_already_booked
+
+    lead = env.lead("Sheet Booked", status="booked")
+    lead_data = {"full_name": "Sheet Booked", "date_of_birth": None}
+    assert _same_person_already_booked(env.db, env.practice_id, "+15552010000", lead_data)["id"] == lead
+
+
+def test_person_still_in_cadence_is_left_to_the_repeat_patient_rule(env):
+    from rpt_agent.services.lead_actions import _same_person_already_booked
+
+    env.lead("Still Calling")
+    lead_data = {"full_name": "Still Calling", "date_of_birth": "1990-01-01"}
+    assert _same_person_already_booked(env.db, env.practice_id, "+15552010000", lead_data) is None
+
+
+# --- a delete we cannot match -------------------------------------------------
+
+
+def test_delete_matching_two_visits_flags_the_booked_lead_for_staff(env):
+    # 2026-10-13: Mock Stride allowed two visits in one case at one time; the delete matched both, was
+    # skipped, the lead stayed Booked and hid every later cancel. Now staff are told.
+    from rpt_agent.services.sheet_sync import build_sheet_snapshot
+
+    lead = env.lead("Twin Slot")
+    day = future_day()
+    env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [patient("101", first="Twin", last="Slot")]))
+    env.drop("appointments_20261001100000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("9001", "101", "7001", day), appointment("9002", "101", "7001", day)]))
+    env.tick()
+    assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
+    env.drop("appointments_20261001110000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("", "101", "7001", day, action="Delete", modified="2026-10-01 11:00:00",
+                    **{"Created Date Time": ""})]))
+    env.tick()
+    issues = env.one("select issues from stride_import_files order by id desc limit 1")["issues"]
+    assert [i["reason"] for i in issues] == ["delete_ambiguous"]
+    row = env.one("select status,needs_review,review_reason from leads where id=%s", lead)
+    assert (row["status"], row["needs_review"], row["review_reason"]) == (
+        "needs_attention", True, "Unclear change in Stride")
+    sheet = build_sheet_snapshot(env.db, str(lead))["sheet"]
+    assert (sheet["action_status"], sheet["action"]) == ("Needs review: Unclear change in Stride", "")
+    assert env.tick().get("leads_booked") == 0  # the still-active twin does not re-book it
+
+
+def test_unmatched_delete_for_a_patient_without_a_lead_changes_nothing(env):
+    env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [patient("101", first="Walk", last="In")]))
+    env.drop("appointments_20261001110000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("", "101", "7001", future_day(), action="Delete", modified="2026-10-01 11:00:00",
+                    **{"Created Date Time": ""})]))
+    env.tick()
+    issues = env.one("select issues from stride_import_files order by id desc limit 1")["issues"]
+    assert [i["reason"] for i in issues] == ["delete_unmatched"]
+    assert env.one("select count(*) n from leads where practice_id=%s", env.practice_id)["n"] == 0

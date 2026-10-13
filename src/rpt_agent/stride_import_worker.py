@@ -40,7 +40,7 @@ from .services.stride_import import (
     file_sort_key,
     parse_file_name,
 )
-from .services.stride_leads import reconcile_leads
+from .services.stride_leads import flag_unclear_deletes, reconcile_leads
 
 SERVICE = "stride-worker"
 # One importer at a time, even if a second container is started by mistake.
@@ -240,6 +240,8 @@ def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
                     max_bad_row_percent=settings.stride_max_bad_row_percent,
                     progress=progress,
                 )
+            if result.unclear_delete_patients:
+                flag_unclear_deletes(conn, practice["id"], result.unclear_delete_patients)
             conn.execute(
                 "update stride_import_files set status='processed',row_count=%s,applied_count=%s,"
                 "unchanged_count=%s,issue_count=%s,issues=%s,error=null,processed_at=now() where id=%s",
