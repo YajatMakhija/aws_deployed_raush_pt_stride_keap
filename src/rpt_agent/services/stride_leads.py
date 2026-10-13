@@ -22,16 +22,27 @@ from .stride_import import CANCELLED_STATUSES
 
 _CANCELLED = tuple(sorted(CANCELLED_STATUSES))
 
-# Same person: identical normalized full name AND (same date of birth, or - only
-# when either side has no DOB - the lead's phone is one of the patient's phones).
+# Same person: the names agree AND (same date of birth, or - only when either side
+# has no DOB - the lead's phone is one of the patient's phones). Names agree when the
+# normalized full names are equal, or the first names are equal and the lead has no
+# last name: the Sheet accepts one-word names ("devyansh") while Stride always has a
+# first and last name, so a full-name comparison never matched them (seen in testing).
 # Two people in one family share a phone and surname but not a first name + DOB.
 _CANDIDATES_SQL = """
 select p.stride_id, l.id as lead_id
 from stride_patients p
 join leads l on l.practice_id=p.practice_id
  and l.stride_patient_id is null
- and lower(regexp_replace(trim(l.full_name),'\\s+',' ','g'))
-   = lower(regexp_replace(trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),'\\s+',' ','g'))
+ and (
+   lower(regexp_replace(trim(l.full_name),'\\s+',' ','g'))
+     = lower(regexp_replace(trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),'\\s+',' ','g'))
+   or (
+     nullif(trim(coalesce(l.last_name,'')),'') is null
+     and lower(trim(coalesce(nullif(trim(l.first_name),''), split_part(trim(l.full_name),' ',1))))
+       = lower(trim(coalesce(p.first_name,'')))
+     and position(' ' in trim(l.full_name)) = 0
+   )
+ )
  and (
    (p.date_of_birth is not null and l.date_of_birth is not null and p.date_of_birth=l.date_of_birth)
    or ((p.date_of_birth is null or l.date_of_birth is null) and l.phone_e164 is not null

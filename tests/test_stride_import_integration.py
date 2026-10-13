@@ -709,3 +709,39 @@ def test_dashboard_endpoint_returns_the_status(env, monkeypatch):
     )
     assert response.status_code == 200
     assert set(response.json()) >= {"overall", "headline", "alerts", "today", "recent_files", "last_7_days"}
+
+
+def _one_word_lead(env, name, dob="1990-01-01", phone="+15552010000"):
+    # The Sheet accepts one-word names: first_name set, last_name empty.
+    return env.db.execute(
+        "insert into leads(practice_id,source_system,full_name,first_name,last_name,phone_e164,date_of_birth,"
+        "status,cadence_state,is_test) values(%s,'google_sheets',%s,%s,null,%s,%s,'in_progress','active',true) "
+        "returning id",
+        (env.practice_id, name, name, phone, dob),
+    ).fetchone()["id"]
+
+
+def test_one_word_sheet_name_matches_stride_first_name_and_birthday(env):
+    """Seen in testing: lead "devyansh" never matched Stride's "devyansh <last name>"."""
+    lead = _one_word_lead(env, "devyansh")
+    _import_patient_with_appointment(env, first="Devyansh", last="Chaudhary")
+    row = env.one("select status,stride_patient_id from leads where id=%s", lead)
+    assert (row["status"], row["stride_patient_id"]) == ("booked", 101)
+
+
+def test_one_word_name_with_a_different_birthday_does_not_match(env):
+    lead = _one_word_lead(env, "devyansh", dob="1960-01-01")
+    _import_patient_with_appointment(env, first="Devyansh", last="Chaudhary", dob="2000-06-13")
+    assert env.one("select stride_patient_id from leads where id=%s", lead)["stride_patient_id"] is None
+
+
+def test_two_word_lead_still_needs_the_same_last_name(env):
+    lead = env.lead("Sam Test")
+    _import_patient_with_appointment(env, first="Sam", last="Other")
+    assert env.one("select stride_patient_id from leads where id=%s", lead)["stride_patient_id"] is None
+
+
+def test_one_word_name_matches_by_phone_when_birthday_is_missing(env):
+    lead = _one_word_lead(env, "devyansh", dob=None)
+    _import_patient_with_appointment(env, first="Devyansh", last="Chaudhary")
+    assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
