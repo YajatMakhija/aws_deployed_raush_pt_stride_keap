@@ -615,6 +615,17 @@ def test_each_way_a_booking_falls_through_gets_its_own_reason(env, change, reaso
     history = env.one("select reason from lead_status_history where lead_id=%s and to_status='needs_attention'",
                       lead)
     assert history["reason"] == reason
+    # The next ticks must leave it alone: a future no-show re-booked the lead (seen on demo).
+    assert env.tick().get("leads_booked") == 0
+    assert env.one("select status from leads where id=%s", lead)["status"] == "needs_attention"
+
+
+def test_no_show_patient_who_books_a_new_visit_is_booked_again(env):
+    lead, _ = _book_then_change(env, "Return Test", status="No Show")
+    env.drop("appointments_20261001120000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("9002", "101", "7001", future_day(14), modified="2026-10-01 12:00:00")]))
+    assert env.tick()["leads_booked"] == 1
+    assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
 
 
 @pytest.mark.parametrize("status", ["Confirmed", "O", "Checked In", "C", "Unmarked"])

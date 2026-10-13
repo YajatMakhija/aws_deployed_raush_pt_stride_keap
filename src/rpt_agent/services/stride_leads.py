@@ -21,7 +21,6 @@ from typing import Any
 from .sheet_sync import enqueue_sheet_update
 from .stride_import import CANCELLED_STATUSES, LATE_CANCEL_STATUSES, NO_SHOW_STATUSES
 
-_CANCELLED = tuple(sorted(CANCELLED_STATUSES))
 # A booking that did not happen: cancelled, late-cancelled or no-show (deletes too).
 _MISSED = tuple(sorted(CANCELLED_STATUSES | NO_SHOW_STATUSES))
 
@@ -110,7 +109,11 @@ def link_patients_to_leads(conn, practice_id: int) -> dict[str, int]:
 
 
 def mark_leads_booked_from_stride(conn, practice_id: int) -> int:
-    """A linked lead with a future, non-cancelled appointment is booked: stop outreach."""
+    """A linked lead with a future appointment that is still on is booked: stop outreach.
+
+    A no-show counts as "not on" too: staff can mark one on a visit that has not
+    started yet, and it must not re-book the lead it just flagged.
+    """
     rows = conn.execute(
         "select distinct on (l.id) l.id,a.stride_id as appointment_id,a.case_stride_id "
         "from leads l join stride_patients p on p.lead_id=l.id and p.deleted_at is null "
@@ -118,7 +121,7 @@ def mark_leads_booked_from_stride(conn, practice_id: int) -> int:
         " and a.patient_stride_id=p.stride_id and a.deleted_at is null "
         " and a.start_utc>now() and lower(coalesce(a.status,'')) <> all(%s) "
         "where l.practice_id=%s and l.status<>'booked' order by l.id,a.start_utc",
-        (list(_CANCELLED), practice_id),
+        (list(_MISSED), practice_id),
     ).fetchall()
     booked = 0
     for row in rows:
