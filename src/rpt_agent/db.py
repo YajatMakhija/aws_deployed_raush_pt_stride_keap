@@ -18,8 +18,9 @@ def get_pool() -> ConnectionPool:
         raise RuntimeError("SUPABASE_DB_URL is required for database operations")
     return ConnectionPool(
         conninfo=url,
-        min_size=1,
-        max_size=10,
+        min_size=0,
+        max_size=settings.db_pool_max_size,
+        max_idle=settings.db_pool_max_idle_seconds,
         open=True,
         timeout=settings.db_pool_timeout_seconds,
         kwargs={"row_factory": dict_row, "connect_timeout": int(settings.db_pool_timeout_seconds)},
