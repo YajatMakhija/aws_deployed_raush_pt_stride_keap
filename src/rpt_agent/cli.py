@@ -13,6 +13,7 @@ from .config import get_settings
 from .db import transaction
 from .observability import WorkflowTrace, configure_logging
 from .providers import ProviderClients
+from .services import keap_desired, keap_oauth
 from .services.delivery import process_pending_integrations
 from .sftp_fixtures import load_stride_fixtures
 from .worker import format_phone, materialize_cadence, run_tick
@@ -204,6 +205,106 @@ def booking_demo_seed() -> None:
     print(json.dumps(counts, indent=2))
 
 
+class _DryRun(Exception):
+    """Raised to roll a dry run back."""
+
+
+def keap_plan(args) -> None:
+    """Compute (and queue) what each person's Keap contact should look like. No Keap calls."""
+    slug = get_settings().stride_practice_slug
+    printed: list[dict] = []
+    counts: dict = {}
+    try:
+        with transaction() as conn:
+            practice = conn.execute("select id from practices where slug=%s", (slug,)).fetchone()
+            if practice is None:
+                raise SystemExit(f"practice {slug!r} not found")
+            counts = keap_desired.plan_changes(
+                conn, practice["id"], full=args.full, limit=args.limit
+            )
+            for row in conn.execute(
+                "select desired from keap_sync where practice_id=%s and desired is not null "
+                "order by desired_at desc limit 5",
+                (practice["id"],),
+            ):
+                printed.append(keap_desired.mask_desired(row["desired"]))
+            if args.dry_run:
+                raise _DryRun
+    except _DryRun:
+        counts["dry_run"] = True
+    print(json.dumps({"counts": counts, "sample_masked": printed}, indent=2, default=str))
+
+
+def _keap_client(practice_id: int):
+    from .services.keap_client import KeapClient
+
+    return KeapClient(practice_id, get_settings())
+
+
+def _practice_id() -> int:
+    slug = get_settings().stride_practice_slug
+    with transaction() as conn:
+        practice = conn.execute("select id from practices where slug=%s", (slug,)).fetchone()
+    if practice is None:
+        raise SystemExit(f"practice {slug!r} not found")
+    return practice["id"]
+
+
+def keap_discover() -> None:
+    """Read-only: list the Keap tags and custom fields so the mapping can be filled in."""
+    practice_id = _practice_id()
+    client, trace = _keap_client(practice_id), WorkflowTrace("keap_discover", "cli")
+    categories = {c["id"]: c.get("name") for c in client.list_tag_categories(trace)}
+    tags = client.list_tags(trace)
+    fields = client.contact_model(trace).get("custom_fields", [])
+    print(json.dumps({
+        "account": (keap_oauth.connection_status(practice_id) or {}).get("keap_account"),
+        "tags": [
+            {"id": t["id"], "name": t["name"],
+             "category": categories.get((t.get("category") or {}).get("id"))}
+            for t in sorted(tags, key=lambda t: int(t["id"]))
+        ],
+        "custom_fields": [
+            {"id": f["id"], "label": f.get("label"), "type": f.get("field_type")} for f in fields
+        ],
+    }, indent=2))
+
+
+def keap_sync_once(args) -> None:
+    """Plan and sync one person now (for testing against the sandbox)."""
+    from .services.keap_sync import sync_row
+
+    practice_id = _practice_id()
+    with transaction() as conn:
+        keap_desired.plan_changes(conn, practice_id)
+        if args.lead:
+            row = conn.execute("select id from keap_sync where lead_id=%s", (args.lead,)).fetchone()
+        else:
+            row = conn.execute(
+                "select id from keap_sync where practice_id=%s and stride_patient_id=%s",
+                (practice_id, args.patient),
+            ).fetchone()
+        if row is None:
+            raise SystemExit("no keap_sync row for that person")
+        claimed = conn.execute(
+            "update keap_sync set status='syncing',attempts=attempts+1 where id=%s and desired is "
+            "not null returning *", (row["id"],),
+        ).fetchone()
+    if claimed is None:
+        raise SystemExit("that person has nothing to send (skipped or no details)")
+    outcome = sync_row(_keap_client(practice_id), claimed, WorkflowTrace("keap_sync_once", "cli"))
+    print(json.dumps({"outcome": outcome}))
+
+
+def keap_retry_failed() -> None:
+    with transaction() as conn:
+        n = conn.execute(
+            "update keap_sync set status='pending',attempts=0,next_attempt_at=now(),last_error=null "
+            "where status='failed'"
+        ).rowcount
+    print(json.dumps({"reset": n}))
+
+
 def main() -> None:
     configure_logging("cli")
     parser = argparse.ArgumentParser(prog="rpt")
@@ -212,6 +313,16 @@ def main() -> None:
         "migrate", "verify", "seed", "demo", "fixtures", "tick", "booking-sync", "booking-demo-seed",
     ):
         subparsers.add_parser(command)
+    for command in ("keap-discover", "keap-retry-failed"):
+        subparsers.add_parser(command)
+    once = subparsers.add_parser("keap-sync-once", help="plan and sync one person to Keap now")
+    target = once.add_mutually_exclusive_group(required=True)
+    target.add_argument("--lead")
+    target.add_argument("--patient", type=int)
+    plan = subparsers.add_parser("keap-plan", help="plan what Keap should hold (no Keap calls)")
+    plan.add_argument("--full", action="store_true", help="recompute everyone")
+    plan.add_argument("--dry-run", action="store_true", help="compute but write nothing")
+    plan.add_argument("--limit", type=int, default=None)
     test_lead = subparsers.add_parser("test-lead", help="create a consented synthetic lead")
     test_lead.add_argument("--phone", required=True)
     test_lead.add_argument("--first-name", default="Synthetic")
@@ -234,6 +345,10 @@ def main() -> None:
         )),
         "tick": lambda: print(json.dumps(run_tick(), indent=2)),
         "test-lead": lambda: create_test_lead(args),
+        "keap-plan": lambda: keap_plan(args),
+        "keap-discover": keap_discover,
+        "keap-sync-once": lambda: keap_sync_once(args),
+        "keap-retry-failed": keap_retry_failed,
         "booking-sync": booking_sync,
         "booking-demo-seed": booking_demo_seed,
         "agent": lambda: run_terminal(

@@ -11,6 +11,7 @@ from .routes import (
     booking_tools_router,
     dashboard_router,
     health_router,
+    keap_router,
     leads_router,
     n8n_router,
     twilio_router,
@@ -68,6 +69,7 @@ app.include_router(dashboard_calendar_router)
 app.include_router(agent_router)
 app.include_router(appointments_router)
 app.include_router(leads_router)
+app.include_router(keap_router)
 app.include_router(n8n_router)
 app.include_router(vapi_router)
 app.include_router(twilio_router)

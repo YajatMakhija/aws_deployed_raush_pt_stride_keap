@@ -105,6 +105,22 @@ Body shapes:
 | Phone filter wants national digits or E.164 | search a known test contact |
 | `duplicate_option=EmailAndName` with same email, different first name | must create a new contact |
 
+### 3.5a Answers found in the sandbox (`puq284`, 2026-10-14) - these override section 3 above
+
+| Question | Answer |
+| --- | --- |
+| DATE custom field format | Send `"2026-10-15"`. Keap reads it back as `"2026-10-15T04:00:00.000Z"` (midnight in the account's time zone, shown in UTC), so compare only the first 10 characters. An account east of UTC would read back the previous day; revisit if the production account is not in the Americas. |
+| DATE_TIME format | Not tested; DATE_TIME fields are rejected as unsupported until someone needs them. |
+| `contact_type` for Lead | `"Lead"` is accepted and read back as `"Lead"`. We set it only when creating a contact, never on an existing one (a clinic "Customer" must not be downgraded). |
+| `update_mask` | A comma list works (`given_name,custom_fields`). |
+| Custom field PATCH | **Merged by id, not replaced whole.** A PATCH with one field left the others alone; `{"id": "8", "content": null}` clears a field. So we send only our own changed fields, with `null` to clear. Other arrays (emails, phones) are still treated as replaced whole. |
+| `applyTags` on a tag already on the contact | 200, no error. |
+| Phone filter | Matches the number exactly as stored. `+15555550123` found it; bare national digits, `(555) 555-0123` and `555555*` did not. We store and search E.164. |
+| `duplicate_option=EmailAndName` | **Not safe.** Same email and family name with a different first name returned the existing contact (updating it). We never pass it: we search by email + full name first and then do a plain create. |
+
+Deviations from the text above: `contact_type` only on create; no `duplicate_option`; custom fields are
+sent as owned-only changes; phone search uses E.164 (`desired.match.phone`).
+
 ## 4. Database — migration `037_keap_connection.sql`
 
 ```sql

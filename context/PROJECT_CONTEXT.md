@@ -562,7 +562,8 @@ mark a message delivered.
 - A configurable, HMAC-signed, event-ID-deduplicated webhook is owned by the Keap team and is the real
   pre-production integration boundary when `KEAP_MODE=real`.
 - Mock receiver records events and simulates success, rejection, timeout, and duplicate delivery.
-- Direct Keap OAuth/CRM mutation is not implemented because no application/OAuth contract was supplied.
+- The older signed handoff above is unchanged. A separate contact sync (Keap OAuth + REST v2, tags and
+  appointment fields) was added in 2026-10-14; see that changelog entry and `docs/PHASE_2A_KEAP_DATA.md`.
 - Stride CSV import (2026-10-08): Stride uploads `<entity>_<YYYYMMDDHHMMSS>.csv` exports (full load, then
   changed rows) to the EC2 SFTP inbox `/srv/sftp/stride/incoming` (chrooted `stride` user, key-only). The
   `stride-worker` container imports them into the `stride_*` tables (migration 032) and moves each file to
@@ -874,6 +875,39 @@ npm.cmd run build
 
 Append entries newest first. Include date, decision/change, migrations, configuration impact, validation, and
 known follow-up. Do not include secrets or patient/tester identifiers.
+
+### 2026-10-14 - Keap contact sync built (phases 2A and 2B), tested against the Keap sandbox
+
+- **2A** (`services/keap_desired.py`, migration `036_keap_sync.sql`, `rpt keap-plan [--full] [--dry-run]`): for
+  every lead and Stride patient, decide from our own database what the Keap contact should hold (name,
+  email, phone, birthday, tags, one shared Appointment Date/Time/Clinician set) and store it as
+  `keap_sync.desired` with a hash. Changed hash = queued. Tables: `keap_sync`, `keap_appointment_types`;
+  new `practice_settings.keap_*` columns. Rules and the sandbox mapping are in `docs/PHASE_2A_KEAP_DATA.md`
+  section 0.4. Pending `144` is replaced by `186` AI Gave Up when a cadence ends (closed_no_response /
+  declined); Do Not Contact, invalid phone and transferred are left unchanged until the client picks tags.
+- **2B** (`keap_sync_worker.py` = `rpt-keap-worker`, `services/keap_oauth.py`, `keap_client.py`,
+  `keap_sync.py`, `keap_sync_status.py`, `routes/keap.py`, migration `037_keap_connection.sql`): separate
+  service that finds or creates the contact (search by email + full name, never Keap's own duplicate
+  option), patches only fields we own, applies wanted tags first and then removes owned tags. OAuth tokens
+  live in `keap_connections` and are refreshed under a row lock. Endpoints: `GET /api/v1/keap/oauth/start`
+  (super admin), `GET /api/v1/keap/oauth/callback` (public, signed state), `GET /api/v1/dashboard/keap-sync`.
+  CLI: `rpt keap-discover`, `keap-sync-once`, `keap-retry-failed`; dev scripts `scripts/keap_import_tokens.py`,
+  `scripts/keap_sandbox_e2e.py`, `supabase/dev/keap_sandbox_mapping.sql`. Switched off by default
+  (`KEAP_SYNC_ENABLED=false`); compose service `keap-worker`.
+- Sandbox (`puq284`) findings that differ from the docs (written into `docs/PHASE_2B_KEAP_DELIVERY.md`
+  section 3.5): DATE custom fields accept `YYYY-MM-DD` but read back as `...T04:00:00.000Z`;
+  `custom_fields` PATCH merges by id and `content: null` clears a field; `duplicate_option=EmailAndName`
+  updates a contact that shares email + family name (a family member), so it is not used; phone search
+  needs the number exactly as stored (E.164); `contact_type` "Lead" is accepted; applying an existing tag
+  is a 200.
+- Logging fix: httpx logs every request url at INFO and Keap search urls carry the email/phone URL-encoded
+  (the redaction regexes miss `%40`), so `observability.quiet_http_libraries()` sets httpx/httpcore to WARNING.
+- Tests: `test_keap_desired.py` (31 pure), `test_keap_desired_integration.py` (25), `test_keap_sync_integration.py`
+  (36, against `tests/fake_keap.py`). Sandbox run: 18/18 checks pass. Four older
+  `test_stride_import_integration.py` status tests fail only on a Postgres without time-zone data
+  (embedded Windows Postgres); they pass on a normal one.
+- Not done yet: deploy to demo, real appointment-type list from Rausch Stride, Michelle's confirmation of
+  the type-to-tag pairing and of Do Not Contact / staff-closed tags, production Keap account.
 
 ### 2026-10-13 - Publish companion appointment calendar PRs
 

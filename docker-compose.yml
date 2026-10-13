@@ -32,6 +32,15 @@ services:
     volumes:
       - ./src:/app/src
       - ./logs:/app/logs
+  keap-worker:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    command: rpt-keap-worker
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
   stride-worker:
     build: .
     env_file:

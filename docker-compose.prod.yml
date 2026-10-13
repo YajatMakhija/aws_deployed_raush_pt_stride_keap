@@ -47,6 +47,20 @@ services:
     volumes:
       - ./logs:/app/logs
 
+  # Keap contact sync (phase 2B). Separate so a slow or rate-limited Keap can never
+  # delay calls/SMS, the Sheet or the Stride import. Idles while KEAP_SYNC_ENABLED=false.
+  keap-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: stride-keap-worker
+    restart: unless-stopped
+    mem_limit: 256m
+    env_file: .env
+    command: rpt-keap-worker
+    volumes:
+      - ./logs:/app/logs
+
   # Stride CSV import. The only container that sees the SFTP folders: it reads
   # Stride's uploads and moves each one to archive or error (so not read-only).
   # Keeps the voice-agent slot cache fresh from Stride (every BOOKING_SYNC_SECONDS).

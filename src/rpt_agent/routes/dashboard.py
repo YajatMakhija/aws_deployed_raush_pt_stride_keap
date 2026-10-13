@@ -14,6 +14,7 @@ from ..db import transaction
 from ..observability import WorkflowTrace
 from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
+from ..services.keap_sync_status import keap_sync_status
 from ..services.number_block import NumberBlockError, block_number, unblock_number
 from ..services.provider_http import ProviderError
 from ..services.review import (
@@ -663,6 +664,13 @@ def dashboard_stride_sync(actor: Actor):
     """Is Stride's SFTP feed arriving and loading? Plain-language status, alerts, today's numbers."""
     with transaction() as conn:
         return stride_sync_status(conn, actor.practice_id)
+
+
+@router.get("/keap-sync")
+def dashboard_keap_sync(actor: Actor):
+    """Is the Keap contact sync connected and keeping up? Plain words, no patient data."""
+    with transaction() as conn:
+        return keap_sync_status(conn, actor.practice_id)
 
 
 @router.post("/leads", status_code=201)

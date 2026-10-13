@@ -92,6 +92,23 @@ class Settings(BaseSettings):
     slot_token_secret: str = Field(default="local-slot-secret", min_length=8)
     keap_handoff_url: str = "http://localhost:9000/mock/keap/events"
     keap_handoff_secret: str = "local-keap-secret"
+    # Keap contact sync (phase 2A plans, phase 2B delivers). Off until a practice has
+    # a connection, a mapping and keap_sync_start_at; per-practice choices live in
+    # practice_settings / keap_appointment_types.
+    keap_sync_enabled: bool = False
+    keap_include_test_leads: bool = False  # true only while testing against the Keap sandbox
+    keap_plan_batch: int = Field(default=500, ge=1, le=5000)
+    keap_client_id: str = ""
+    keap_client_secret: str = ""
+    keap_redirect_uri: str = "https://stride.aibolt.ai/api/v1/keap/oauth/callback"
+    keap_api_base_url: str = "https://api.infusionsoft.com/crm/rest/v2"
+    keap_token_url: str = "https://api.infusionsoft.com/token"
+    keap_authorize_url: str = "https://accounts.infusionsoft.com/app/oauth/authorize"
+    keap_sync_poll_seconds: int = Field(default=30, ge=1, le=3600)
+    keap_sync_batch_size: int = Field(default=20, ge=1, le=200)
+    keap_sync_max_attempts: int = Field(default=3, ge=1, le=20)
+    keap_max_requests_per_minute: int = Field(default=120, ge=1, le=1500)
+    keap_max_requests_per_day: int = Field(default=40000, ge=1, le=150000)
     worker_poll_seconds: int = 30
     # Master stop for anything that reaches a patient. Defaults on so a missing
     # variable can never silence outreach by accident; set false to suspend all
@@ -133,10 +150,10 @@ class Settings(BaseSettings):
     def runtime_errors(self, service: str) -> list[str]:
         errors: list[str] = []
         deployment_env = self.app_env.lower() in {"preproduction", "preprod", "staging", "production", "prod"}
-        if service in {"api", "worker", "sheet-worker", "stride-worker", "booking-worker", "cli"} and not self.supabase_db_url:
+        if service in {"api", "worker", "sheet-worker", "stride-worker", "booking-worker", "keap-worker", "cli"} and not self.supabase_db_url:
             errors.append("SUPABASE_DB_URL is required")
         elif (
-            service in {"api", "worker", "sheet-worker", "stride-worker", "booking-worker", "cli"}
+            service in {"api", "worker", "sheet-worker", "stride-worker", "booking-worker", "keap-worker", "cli"}
             and "db.example.supabase.co" in self.supabase_db_url
         ):
             errors.append("SUPABASE_DB_URL still contains the example hostname")
@@ -250,6 +267,11 @@ class Settings(BaseSettings):
                 errors.append("N8N_SHEET_WEBHOOK_SECRET is required when Sheet sync is enabled")
             if not self.n8n_practice_slug.strip():
                 errors.append("N8N_PRACTICE_SLUG is required when Sheet sync is enabled")
+        if service in {"api", "keap-worker"} and self.keap_sync_enabled:
+            if not self.keap_client_id or not self.keap_client_secret:
+                errors.append("KEAP_CLIENT_ID and KEAP_CLIENT_SECRET are required when Keap sync is enabled")
+            if deployment_env and not self.keap_redirect_uri.startswith("https://"):
+                errors.append("KEAP_REDIRECT_URI must use HTTPS")
         if self.retry_max_seconds < self.retry_base_seconds:
             errors.append("RETRY_MAX_SECONDS must be greater than or equal to RETRY_BASE_SECONDS")
         return errors

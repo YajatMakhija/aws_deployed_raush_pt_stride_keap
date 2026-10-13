@@ -102,6 +102,31 @@ in section 11. Then show the developer the changed sections and wait for "go" be
   "needs attention").
 - Stride sends changes every 5 minutes; Keap may lag by one import tick plus the worker delay, never more.
 
+## 0.4 Decisions so far (sandbox `puq284`, discovered 2026-10-13) — these override section 3 where they differ
+
+**Scope for now:** the three mock Stride types only (`scripts/fake_stride.py` `TYPES`). Real Rausch types come later.
+
+**Real Keap objects found (read-only):**
+- Pending tag = `144`. Custom fields (single set, NOT per type): Appointment Date `6` (DATE), Appointment Time `8` (TEXT), Clinician `10` (TEXT).
+- Draft type mapping (sandbox testing only; Michelle to confirm):
+
+| Stride type (mock id) | Booked tag | Completed tag |
+| --- | --- | --- |
+| Initial Evaluation (2) | `180` STATUS: New Evaluation Booked | `172` STATUS: Eval Completed |
+| Follow-up (1) | `184` STATUS: PT Appt Booked | `176` STATUS: PT Appt Completed |
+| Progress Note (3) | `174` STATUS: POC Appt Booked | `156` STATUS: PT Completed their POC |
+
+**Rule changes:**
+- R8: only ONE date/time/clinician set. Value = the next upcoming counting appointment across ALL mapped types; none upcoming -> most recent past; none -> null. So `keap_appointment_types.date_field_id/time_field_id/clinician_field_id` are identical (`6/8/10`) on every row; `fields` in `desired` has exactly three entries.
+- R2: `keap_include_existing_patients = true` for the sandbox (we want the full first load). `keap_sync_start_at = now() - 1 day`.
+- R6: remove Booked when the appointment is cancelled/deleted (`keap_remove_booked_on_cancel = true`).
+- R4 end of cadence: a lead whose cadence ends with no booking loses Pending and gets `186` STATUS: AI Gave Up (apply first, then remove Pending). Closed by staff -> proposal `168` Handed off to Human (not confirmed). **Do Not Contact: not handled yet** — Michelle decides the tag; until then a DNC lead is left unchanged. Do not delete contacts. Email opt-out via Keap's email-address-status API is a separate, later, verified step.
+- C1 (new lead arrives): create contact (name, email, phone, birthday if known, contact type Lead), apply Pending `144`, leave date/time/clinician empty.
+- Do not touch sandbox contacts 204 and 206.
+- Test leads: `KEAP_INCLUDE_TEST_LEADS=true` in the sandbox only.
+
+**Still open:** C2-C13 walkthrough, exact `contact_type` string for Lead, whether DNC/Closed get tags, real Rausch appointment types.
+
 ## 3. Business rules (DRAFT — replace with the answers from section 0)
 
 Source: the Keap admin's request — "Add contact to Keap if they aren't already in the system: first name,
