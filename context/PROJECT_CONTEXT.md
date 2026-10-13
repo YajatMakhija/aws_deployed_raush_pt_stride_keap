@@ -1,6 +1,6 @@
 # RPT Agent — Complete Project Context and Handoff
 
-Last updated: 2026-10-05 (Asia/Calcutta)
+Last updated: 2026-10-13 (Asia/Calcutta)
 
 This is the durable context file for future Codex, Claude, and human development sessions. Read this file
 before changing the project. Update it whenever a material decision, schema migration, integration contract,
@@ -205,6 +205,16 @@ dashboard token. It has no client state-management or component-library dependen
 The old flat `services.py` was removed and split into the `services/` package. HTTP routes and provider
 contracts are now named by responsibility so the pre-production path is navigable without adding a framework
 or speculative layers. `providers.py` remains only as a small compatibility facade for existing callers.
+
+### Appointment calendar (2026-10-13)
+
+`routes/dashboard_calendar.py` owns the staff calendar and booking endpoints. The frontend's
+`app/appointments-page.tsx` and `app/appointment-data.ts` render the schedule without a calendar
+library. See the frontend `APPOINTMENT_CALENDAR.md` for the HTTP contract and integration limits.
+The current frontend requires the updated backend endpoints; release both repositories together.
+Calendar reads never trigger imports, outreach or provider writes. New bookings reuse `slot_booking`,
+whose existing completion path queues Google Sheets updates and confirmation delivery. Staff can
+inspect imported appointments with no linked lead; the UI does not manufacture an outreach record.
 
 ## Database and migrations
 
@@ -655,17 +665,16 @@ applied, and both idempotent mock deliveries completed.
 
 ## Test and quality status
 
-Latest verified local result on 2026-10-05 on the current backend and frontend worktrees:
+Latest verified local result on 2026-10-13 on the current backend and frontend worktrees:
 
 ```text
-backend: 208 passed, 3 skipped; Ruff all checks passed; wheel build passed
-frontend: 15 tests passed; lint and TypeScript check passed
-frontend: Vinext and native Next production builds passed
+backend: 261 passed, 109 integration tests deselected; Ruff src/tests passed
+frontend: 22 tests passed; lint, TypeScript and production builds passed
 both repositories: git diff --check passed
 ```
 
-The three skipped tests are optional integration/real-provider tests requiring explicit environment values,
-including `TEST_DATABASE_URL` or provider sandbox credentials. An upstream Starlette/AnyIO deprecation
+Integration and real-provider tests were excluded with `-m 'not integration'`; no external database
+or provider writes were exercised. Configured-database calendar reads succeeded. An upstream Starlette/AnyIO deprecation
 warning remains; it is not an application failure. The workstation uses Node 26, while deployment remains Node 22.
 
 Covered tests include:
@@ -781,12 +790,14 @@ npm.cmd run build
 
 ## Current Git state at this handoff
 
-- Backend `F:\rpt\aws_deployed_raush_pt_stride_keap`: branch `main`, HEAD `8e40c4e`, aligned with
-  `origin/main` before this context-only edit.
-- Frontend `F:\rpt\rpt_frontend`: branch `main`, HEAD `fcde2c1`, aligned with `origin/main` and clean.
-- The merged feature branches remain available locally and remotely; neither was deleted or rewritten.
-- The 2026-09-17 update used the complete Git runtime bundled with GitHub Desktop because the standalone Git
-  installation was missing its HTTPS remote helper. Repository remotes were not changed.
+- Calendar API review branch: `feat/appointment-calendar`, based on backend `origin/main` at `220a770`.
+  The isolated review worktree avoids changing the existing Keap branch and local connector configuration.
+- Companion frontend review branch: `feat/appointment-calendar`, based on `cb17105`.
+  Includes the provided `calendar.md` and connected calendar implementation.
+- Keap contact sync remains separately published in backend PR #13 (`feat/keap-contact-sync`).
+  The frontend's read-only Keap status panel requires that PR's endpoints when released.
+- Local environment files and `.mcp.json` remain outside the published calendar changes.
+- The saved paused-lead stash and existing feature branches are retained.
 
 ## Known limitations and next work
 
@@ -863,6 +874,78 @@ npm.cmd run build
 
 Append entries newest first. Include date, decision/change, migrations, configuration impact, validation, and
 known follow-up. Do not include secrets or patient/tester identifiers.
+
+### 2026-10-13 - Publish companion appointment calendar PRs
+
+- User requested publication of the current frontend and backend code to their repositories.
+- Calendar API changes are isolated from the already-published Keap sync PR #13.
+- The frontend includes its current read-only Keap status panel; release that panel with backend PR #13.
+- Local credentials, environment files, `.mcp.json`, logs and generated build output are excluded.
+- Calendar authentication tests configure a synthetic token explicitly so they pass without a local `.env`.
+- No production deployment, migration or real provider/Google Sheets write is part of publication.
+
+### 2026-10-13 - Connected appointment calendar and local repository update
+
+- Fast-forwarded frontend main from `addb92f` to `cb17105` and backend main from `db1688a` to
+  `da25ad8`. Preserved local environment files, the existing handoff edits, `.mcp.json`, and the
+  user-supplied frontend `calendar.md`. Implementation initially remained local; publication was subsequently requested.
+- Added authenticated, practice-scoped `GET /dashboard/appointment-calendar` with a bounded date
+  range (63 days, 2,000 rows), optional lead scope, clinic timezone, actual clinician assignments,
+  configured business hours and last import time. It combines app bookings with Stride's SFTP mirror;
+  an imported row overrides the old local booking even after a move, cancellation or tombstone.
+  Stride's O/A/L/N codes become readable statuses. Clinic names use the configured Stride location-ID
+  mapping, and confirmed booking IDs stay stable when an imported row replaces the local record.
+  Responses exclude raw CSV/patient contact/DOB data.
+- Rebuilt both the global and lead Appointments tabs from the guide: Day, Week, Month, Locations,
+  Capacity, list, filters, date navigation, details, real duration blocks and overlapping-event lanes.
+  Capacity uses configured weekday hours; a lead-scoped view identifies its restricted record set.
+  Shared select/modal controls were extracted without changing their keyboard/focus behavior.
+- Added authenticated `GET /dashboard/appointment-slots` and `POST /dashboard/appointments`.
+  Availability honors the lead's location/case and any selected practitioner before deduplicating
+  offered times. Creation passes the exact slot ID through the existing booking engine, preserving
+  live Stride recheck, holds, overlap rules, booking gate, idempotency and uncertain-result handling.
+  Contact restrictions and unresolved review prevent booking. The existing engine queues the
+  Google Sheets `lead_booked` outbox event; the established Sheet worker/n8n contract is unchanged.
+- Whole-tree Ruff also sees four unrelated issues in the concurrently added `reference/keap_handover`
+  files. Those reference files and the new Keap handoff documents are outside this change and were preserved.
+- No schema migration, runtime credential, provider mode, worker or live provider/Sheet write changed.
+  Stride rescheduling/cancellation remains an operation in Stride followed by import, because no
+  corresponding provider API has been supplied. No fictitious PATCH appointment API was added.
+- Validation: 261 backend unit/contract tests, 22 frontend tests, application/test Ruff, ESLint, TypeScript,
+  Vinext and native Next.js production builds, and both diff checks passed. The 109 optional database/
+  provider integration tests were excluded. A read-only configured-database calendar query passed
+  (import schema and clinician assignments available). Connected Brave browser QA used an isolated
+  synthetic API/account for all five views, filters, hidden bookings, date navigation, lead scope,
+  create-and-refresh, light/dark, 1536x1024 desktop and 390x844 mobile; no browser errors observed.
+  Appointment-date query validation is covered by the calendar unit tests.
+- Design concept, desktop/mobile proof and verification notes are in the local workspace output
+  directory. Source changes are published on companion calendar review branches. A real Stride booking
+  plus n8n/Google Sheets delivery is still required to verify the external write path end to end.
+
+### 2026-10-10 - Update local repositories from upstream branches
+
+- Fetched all configured origins. All local and remote feature branch tips in both active repositories
+  are already ancestors of `origin/main`; no additional feature-branch merge was needed.
+- Fast-forwarded backend `main` from `a85d6ef` to `db1688a` (four commits). Frontend `main` remains
+  current at `addb92f`. Preserved the existing local handoff edits, untracked configuration, and Git stash.
+- Includes the one-command booking-agent test script, service confirmation and provider-question handling,
+  calmer tool waits, and migration `035_clinician_profile.sql` for clinician credentials and a bounded bio.
+  Migration 035 was downloaded only; it was not applied to a database.
+- Validation: 245 backend unit/contract tests passed, 87 integration tests deselected; Ruff passed.
+  All 17 frontend tests, ESLint, TypeScript, and both Git diff checks passed. Regenerated stale frontend
+  route types with `next typegen`; no tracked frontend files changed.
+- No deployment, database migration, worker startup, provider write, commit, or push was performed.
+
+### 2026-10-09 - Local backend and frontend repository sync
+
+- Fetched both origins and switched from the merged `feat/simplify-lead-workspace` branches to `main`.
+  Fast-forwarded backend to `a85d6ef` and frontend to `addb92f`, preserving feature branches and local
+  environment files. Original backend edits remain recoverable in the named Git stash above.
+- Includes upstream blocked-number controls, Stride CSV import, booking tools, and migrations 032-034.
+  Refreshed the backend editable installation so its new worker entry points are available locally.
+- Validation: 245 backend unit/contract tests and Ruff passed; 83 integration tests were excluded.
+  All 17 frontend tests, ESLint, TypeScript, Vinext production build, and Git diff checks passed.
+- No deployment, database migration, worker startup, or provider write was performed.
 
 ### 2026-10-08 - Stride CSV import (Stride → our database)
 

@@ -546,6 +546,7 @@ class _Deadline:
 def _find_slot_for_booking(
     conn, context: BookingContext, call_key: str, wanted_date: date, wanted_time: clock_time,
     clinician_name: str | None,
+    slot_id: int | None = None,
 ) -> dict[str, Any] | None:
     pool = context.clinicians
     if clinician_name:
@@ -560,9 +561,10 @@ def _find_slot_for_booking(
         "from availability_slots s join clinicians c on c.id=s.clinician_id "
         "where s.booking_location_id=%s and s.duration_minutes=%s and s.clinician_id = any(%s) "
         "and s.local_date=%s and s.local_time=%s and s.status='open' "
+        "and (%s::bigint is null or s.id=%s) "
         "order by offered desc,c.display_name",
         (call_key, OFFER_MEMORY, context.location["id"], context.case_type["duration_minutes"],
-         [c["id"] for c in pool], wanted_date, wanted_time),
+         [c["id"] for c in pool], wanted_date, wanted_time, slot_id, slot_id),
     ).fetchall()
     earliest = context.now_local + timedelta(minutes=context.settings.booking_min_notice_minutes)
     for row in rows:
@@ -663,7 +665,7 @@ def book_slot(
                 "Tell the caller our team will confirm their appointment by text."
             )
         slot = _find_slot_for_booking(conn, context, call_key, wanted_date, wanted_time,
-                                      clinician_name)
+                                      clinician_name, slot_id=arguments.get("slot_id"))
     if slot is None:
         return (
             f"NOT_AVAILABLE: {_spoken_time(wanted_time)} on {_spoken_date(wanted_date)} is not "

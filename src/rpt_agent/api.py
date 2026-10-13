@@ -16,6 +16,7 @@ from .routes import (
     twilio_router,
     vapi_router,
 )
+from .routes.dashboard_calendar import router as dashboard_calendar_router
 
 configure_logging("api")
 
@@ -63,6 +64,7 @@ app.include_router(health_router)
 app.include_router(availability_router)
 app.include_router(booking_tools_router)
 app.include_router(dashboard_router)
+app.include_router(dashboard_calendar_router)
 app.include_router(agent_router)
 app.include_router(appointments_router)
 app.include_router(leads_router)
