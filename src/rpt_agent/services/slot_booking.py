@@ -620,8 +620,11 @@ def _close_attempt(appointment_id: int, hold_id: int, *, state: str, error: str,
 
 # Who booked: the voice agent on a call, or staff from the dashboard calendar. It is stored on the
 # appointment and in the lead's history, so reports can tell them apart.
-BOOKING_SOURCES = {"voice_agent": ("voice_booking", "voice booking"),
-                   "staff": ("staff_booking", "staff booking")}
+# appointments.booking_source has a check constraint (link, call, sms, manual, voice_agent): a staff
+# booking from the dashboard is stored as 'manual'. (A first version stored 'staff' and every
+# calendar booking failed on demo, 2026-10-14; migration 038 now puts the constraint in our files.)
+BOOKING_SOURCES = {"voice_agent": ("voice_agent", "voice_booking", "voice booking"),
+                   "staff": ("manual", "staff_booking", "staff booking")}
 
 
 def _booked_elsewhere(conn, lead_id: str) -> str | None:
@@ -662,7 +665,7 @@ def book_slot(
     providers: ProviderClients | None = None,
     source: str = "voice_agent",
 ) -> str:
-    history_source, label = BOOKING_SOURCES[source]
+    stored_source, history_source, label = BOOKING_SOURCES[source]
     settings = settings or get_settings()
     providers = providers or _fast_providers(settings)
     deadline = _Deadline(settings)
@@ -753,7 +756,7 @@ def book_slot(
                     "location_id,appointment_type_id,start_utc,end_utc) "
                     "values(%s,%s,%s,'booking',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "on conflict do nothing returning id",
-                    (lead_id, context.lead["practice_id"], source, booking_key, *values,
+                    (lead_id, context.lead["practice_id"], stored_source, booking_key, *values,
                      slot["start_utc"], slot["end_utc"]),
                 ).fetchone()
                 if not created:

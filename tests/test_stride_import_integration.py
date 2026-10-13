@@ -1012,3 +1012,16 @@ def test_booking_engine_allows_a_lead_whose_stride_visit_was_cancelled_or_missed
     assert env.one("select status from leads where id=%s", lead)["status"] == "needs_attention"
     assert _booked_elsewhere(env.db, str(lead)) is None
     assert _booked_elsewhere(env.db, str(env.lead("Never Booked", phone="+15552010009"))) is None
+
+
+def test_every_booking_source_we_store_is_allowed_by_the_database(env):
+    # 2026-10-14: a new 'staff' source passed every test (the local schema had no check) and failed
+    # every dashboard booking on demo. The constraint is now in migration 038; keep them in step.
+    import re as regex
+
+    from rpt_agent.services.slot_booking import BOOKING_SOURCES
+
+    definition = env.one("select pg_get_constraintdef(oid) d from pg_constraint "
+                         "where conname='appointments_booking_source_check'")["d"]
+    allowed = set(regex.findall(r"'([a-z_]+)'", definition))
+    assert {stored for stored, _history, _label in BOOKING_SOURCES.values()} <= allowed
