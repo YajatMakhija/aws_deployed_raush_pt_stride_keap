@@ -543,7 +543,7 @@ def test_cancelled_booking_flags_the_lead_and_never_restarts_outreach(env):
     row = env.one("select status,needs_review,review_reason,cadence_state from leads where id=%s", lead)
     assert (row["status"], row["needs_review"], row["cadence_state"]) == (
         "needs_attention", True, "completed")
-    assert row["review_reason"] == "Stride appointment cancelled"
+    assert row["review_reason"] == "Cancelled in Stride"
     assert env.one("select count(*) n from outreach_events where lead_id=%s and status='planned'", lead)["n"] == 0
     assert env.tick().get("leads_flagged") == 0
 
@@ -584,6 +584,118 @@ def test_flagged_lead_that_rebooks_is_booked_again(env):
                             (str(lead),)).fetchall()
     assert [e["event_type"] for e in events] == [
         "sheet.lead_booked", "sheet.stride_booking_cancelled", "sheet.lead_booked"]
+
+
+def _book_then_change(env, name, **change):
+    """Lead books in Stride, then the next export changes that appointment."""
+    first, last = name.split()
+    lead = env.lead(name)
+    day = future_day()
+    _import_patient_with_appointment(env, day=day, first=first, last=last)
+    env.drop("appointments_20261001110000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("" if change.get("action") == "Delete" else "9001", "101", "7001", day,
+                    modified="2026-10-01 11:00:00", **change)]))
+    return lead, env.tick()
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    ({"status": "Cancel"}, "Cancelled in Stride"),
+    ({"status": "Late Cancel"}, "Late cancel in Stride"),
+    ({"status": "No Show"}, "No show in Stride"),
+    ({"status": "A"}, "Cancelled in Stride"),
+    ({"status": "L"}, "Late cancel in Stride"),
+    ({"status": "N"}, "No show in Stride"),
+    ({"action": "Delete"}, "Appointment removed in Stride"),
+])
+def test_each_way_a_booking_falls_through_gets_its_own_reason(env, change, reason):
+    lead, counts = _book_then_change(env, "Reason Test", **change)
+    assert counts["leads_flagged"] == 1
+    row = env.one("select status,needs_review,review_reason from leads where id=%s", lead)
+    assert (row["status"], row["needs_review"], row["review_reason"]) == ("needs_attention", True, reason)
+    history = env.one("select reason from lead_status_history where lead_id=%s and to_status='needs_attention'",
+                      lead)
+    assert history["reason"] == reason
+
+
+@pytest.mark.parametrize("status", ["Confirmed", "O", "Checked In", "C", "Unmarked"])
+def test_confirmed_or_checked_in_booking_stays_booked(env, status):
+    lead, counts = _book_then_change(env, "Kept Test", status=status)
+    assert counts["leads_flagged"] == 0
+    assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
+
+
+def _sheet_marks_booked(env, lead):
+    """What the n8n intake does when the Sheet row's Action reads Booked."""
+    from uuid import uuid4
+
+    from rpt_agent.services.lead_actions import _mark_booked
+
+    _mark_booked(env.db, request_id=uuid4(), practice={"id": env.practice_id}, lead_id=lead,
+                 phone="+15552010000")
+
+
+def test_staff_rebooking_after_a_cancel_is_not_flagged_again(env):
+    # The 2026-10-13 loop: Sheet re-sent Booked, we re-read the same old cancel, flagged again...
+    lead, _ = _book_then_change(env, "Loop Test", status="Cancel")
+    for _ in range(3):
+        _sheet_marks_booked(env, lead)
+        assert env.tick().get("leads_flagged") == 0
+        assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
+    flags = env.one("select count(*) n from lead_status_history where lead_id=%s and to_status='needs_attention'",
+                    lead)
+    assert flags["n"] == 1
+
+
+def test_a_new_cancel_after_staff_rebooked_is_still_flagged(env):
+    lead, _ = _book_then_change(env, "Second Test", status="Cancel")
+    _sheet_marks_booked(env, lead)
+    env.tick()
+    env.drop("appointments_20261001120000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("9002", "101", "7001", future_day(12), modified="2026-10-01 12:00:00")]))
+    env.tick()
+    env.drop("appointments_20261001130000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("9002", "101", "7001", future_day(12), status="No Show", modified="2026-10-01 13:00:00")]))
+    assert env.tick()["leads_flagged"] == 1
+    row = env.one("select status,review_reason from leads where id=%s", lead)
+    assert (row["status"], row["review_reason"]) == ("needs_attention", "No show in Stride")
+
+
+def test_no_show_on_an_old_visit_does_not_flag_a_new_booking(env):
+    lead = env.lead("Old Visit")
+    env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [patient("101", first="Old", last="Visit")]))
+    env.drop("appointments_20261001100000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("8001", "101", "7001", "2025-01-10", status="Unmarked"),
+        appointment("9001", "101", "7001", future_day())]))
+    env.tick()
+    env.drop("appointments_20261001110000.csv", csv_bytes(APPOINTMENT_HEADER, [
+        appointment("8001", "101", "7001", "2025-01-10", status="No Show", modified="2026-10-01 11:00:00")]))
+    assert env.tick()["leads_flagged"] == 0
+    assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
+
+
+def test_sheet_gets_a_final_label_and_the_stale_booked_action_is_cleared(env):
+    from rpt_agent.services.sheet_sync import build_sheet_snapshot
+
+    lead, _ = _book_then_change(env, "Sheet Test", status="Late Cancel")
+    sheet = build_sheet_snapshot(env.db, str(lead))["sheet"]
+    # n8n's intake skips any row whose Outcome Status starts with "Needs review".
+    assert sheet["action_status"] == "Needs review: Late cancel in Stride"
+    assert sheet["action"] == ""
+    assert sheet["needs_review"] == "Needs Review"
+    _sheet_marks_booked(env, lead)
+    sheet = build_sheet_snapshot(env.db, str(lead))["sheet"]
+    assert (sheet["action_status"], sheet["action"]) == ("Booked", "Booked")
+
+
+def test_other_review_reasons_keep_the_staff_action_cell(env):
+    from rpt_agent.services.sheet_sync import build_sheet_snapshot
+
+    lead = env.lead("Other Review")
+    env.db.execute("update leads set status='needs_attention',needs_review=true,review_reason=%s where id=%s",
+                   ("Call result could not be confirmed", lead))
+    sheet = build_sheet_snapshot(env.db, str(lead))["sheet"]
+    assert "action" not in sheet
+    assert not str(sheet.get("action_status") or "").startswith("Needs review")
 
 
 def test_patients_without_a_lead_never_touch_leads(env):

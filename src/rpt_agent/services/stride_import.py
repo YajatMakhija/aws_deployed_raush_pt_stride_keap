@@ -35,6 +35,8 @@ ENTITY_ORDER = (
 
 # Stride wording plus the API's one-letter codes, in case an export uses them.
 CANCELLED_STATUSES = {"cancel", "cancelled", "late cancel", "a", "l"}
+LATE_CANCEL_STATUSES = {"late cancel", "l"}
+NO_SHOW_STATUSES = {"no show", "n"}
 
 
 class StrideFileError(ValueError):

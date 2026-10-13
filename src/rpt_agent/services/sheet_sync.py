@@ -83,9 +83,17 @@ def _action_label(lead: dict[str, Any]) -> str | None:
         return "Booked"
     if lead["status"] == "do_not_contact":
         return "Do not contact applied"
+    if _stride_problem(lead):
+        # The n8n intake skips rows whose Outcome Status starts with "Needs review".
+        return f"Needs review: {lead['review_reason']}"
     if lead["cadence_state"] == "completed":
         return "Cadence completed"
     return None
+
+
+def _stride_problem(lead: dict[str, Any]) -> bool:
+    """Booked lead whose Stride appointment was cancelled / no-show (see stride_leads)."""
+    return bool(lead.get("needs_review")) and str(lead.get("review_reason") or "").endswith(" in Stride")
 
 
 def _call_label(event: dict[str, Any], lead: dict[str, Any]) -> str:
@@ -167,7 +175,7 @@ def build_sheet_snapshot(
 ) -> dict[str, Any]:
     """Build the current Sheet view from committed database truth."""
     lead = conn.execute(
-        "select l.id,l.status,l.cadence_state,l.needs_review,l.callback_requested_at,"
+        "select l.id,l.status,l.cadence_state,l.needs_review,l.review_reason,l.callback_requested_at,"
         "coalesce(l.timezone,p.timezone,'America/Los_Angeles') as timezone "
         "from leads l join practices p on p.id=l.practice_id where l.id=%s "
         "and (%s::text is null or p.slug=%s::text)",
@@ -273,6 +281,11 @@ def build_sheet_snapshot(
     # omit the key so n8n leaves the cell as staff set it.
     if lead["status"] == "booked":
         sheet["action"] = "Booked"
+    # The booking fell through in Stride, so a "Booked" left in the Action cell is
+    # stale. The n8n intake re-sends any row whose Action is "Booked" and whose
+    # Outcome Status is not final, which re-booked the lead every two minutes.
+    elif _stride_problem(lead):
+        sheet["action"] = ""
 
     return {
         "lead_id": str(lead["id"]),

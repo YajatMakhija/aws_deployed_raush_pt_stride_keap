@@ -6,8 +6,9 @@ only learn that when Stride's next export shows the appointment. This module:
 1. links a Stride patient to the lead it belongs to;
 2. marks the lead booked and stops its cadence when the patient has a future,
    non-cancelled appointment;
-3. flags a booked lead for staff when that booking is cancelled or deleted in
-   Stride. It never puts the lead back into calls and texts.
+3. flags a booked lead for staff when that booking is cancelled, late-cancelled,
+   deleted or a no-show in Stride, with a reason that says which. It never puts
+   the lead back into calls and texts.
 
 Every step is recomputed from current table state, so a crash, a re-run or an
 out-of-order file cannot leave it half done.
@@ -18,9 +19,17 @@ from __future__ import annotations
 from typing import Any
 
 from .sheet_sync import enqueue_sheet_update
-from .stride_import import CANCELLED_STATUSES
+from .stride_import import CANCELLED_STATUSES, LATE_CANCEL_STATUSES, NO_SHOW_STATUSES
 
 _CANCELLED = tuple(sorted(CANCELLED_STATUSES))
+# A booking that did not happen: cancelled, late-cancelled or no-show (deletes too).
+_MISSED = tuple(sorted(CANCELLED_STATUSES | NO_SHOW_STATUSES))
+
+# Staff-facing reasons. The Sheet sync recognises them by the " in Stride" ending.
+REASON_CANCELLED = "Cancelled in Stride"
+REASON_LATE_CANCEL = "Late cancel in Stride"
+REASON_NO_SHOW = "No show in Stride"
+REASON_REMOVED = "Appointment removed in Stride"
 
 # Same person: the names agree AND (same date of birth, or - only when either side
 # has no DOB - the lead's phone is one of the patient's phones). Names agree when the
@@ -148,26 +157,39 @@ def mark_leads_booked_from_stride(conn, practice_id: int) -> int:
 
 
 def flag_cancelled_bookings(conn, practice_id: int) -> int:
-    """A booked lead whose Stride booking was cancelled/deleted goes to staff review.
+    """A booked lead whose Stride booking fell through goes to staff review.
 
     "The booking" is any appointment starting after the lead was marked booked;
     older history cannot trigger this. A rebooking in the same window keeps the
     lead booked. The lead stays out of the cadence either way.
+
+    Only a change Stride sent *after* the lead was marked booked counts. Staff
+    marking the lead Booked again (Sheet or dashboard) after a cancel must stick:
+    re-reading the same old cancel made a lead flip Booked <-> Needs attention
+    every two minutes with the Sheet (seen on demo, 2026-10-13).
     """
     rows = conn.execute(
-        "select l.id,l.status_changed_at from leads l join stride_patients p on p.lead_id=l.id "
+        "select distinct on (l.id) l.id,a.deleted_at is not null as removed,"
+        "lower(coalesce(a.status,'')) as appt_status from leads l "
+        "join stride_patients p on p.lead_id=l.id "
+        "join stride_appointments a on a.practice_id=p.practice_id and a.patient_stride_id=p.stride_id "
+        " and a.start_utc>l.status_changed_at and a.updated_at>l.status_changed_at "
+        " and (a.deleted_at is not null or lower(coalesce(a.status,''))=any(%s)) "
         "where l.practice_id=%s and l.status='booked' and not l.needs_review "
-        "and exists(select 1 from stride_appointments a where a.practice_id=p.practice_id "
-        " and a.patient_stride_id=p.stride_id and a.start_utc>l.status_changed_at "
-        " and (a.deleted_at is not null or lower(coalesce(a.status,''))=any(%s))) "
-        "and not exists(select 1 from stride_appointments a where a.practice_id=p.practice_id "
-        " and a.patient_stride_id=p.stride_id and a.start_utc>l.status_changed_at "
-        " and a.deleted_at is null and lower(coalesce(a.status,'')) <> all(%s)) "
-        "for update of l",
-        (practice_id, list(_CANCELLED), list(_CANCELLED)),
+        "and not exists(select 1 from stride_appointments g where g.practice_id=p.practice_id "
+        " and g.patient_stride_id=p.stride_id and g.start_utc>l.status_changed_at "
+        " and g.deleted_at is null and lower(coalesce(g.status,'')) <> all(%s)) "
+        "order by l.id,a.updated_at desc,a.start_utc desc",
+        (list(_MISSED), practice_id, list(_MISSED)),
     ).fetchall()
+    flagged = 0
     for row in rows:
-        reason = "Stride appointment cancelled"
+        lead = conn.execute(
+            "select status,needs_review,status_changed_at from leads where id=%s for update", (row["id"],)
+        ).fetchone()
+        if lead is None or lead["status"] != "booked" or lead["needs_review"]:
+            continue
+        reason = _missed_reason(row["removed"], row["appt_status"])
         conn.execute(
             "update leads set status='needs_attention',needs_review=true,review_reason=%s,"
             "review_flagged_at=now(),status_reason=%s,status_changed_at=now(),updated_at=now() "
@@ -183,9 +205,20 @@ def flag_cancelled_bookings(conn, practice_id: int) -> int:
             conn,
             lead_id=str(row["id"]),
             event_type="stride_booking_cancelled",
-            source_key=f"stride:cancelled:{row['id']}:{row['status_changed_at']}",
+            source_key=f"stride:cancelled:{row['id']}:{lead['status_changed_at']}",
         )
-    return len(rows)
+        flagged += 1
+    return flagged
+
+
+def _missed_reason(removed: bool, status: str) -> str:
+    if removed:
+        return REASON_REMOVED
+    if status in NO_SHOW_STATUSES:
+        return REASON_NO_SHOW
+    if status in LATE_CANCEL_STATUSES:
+        return REASON_LATE_CANCEL
+    return REASON_CANCELLED
 
 
 def reconcile_leads(conn, practice_id: int) -> dict[str, int]:
