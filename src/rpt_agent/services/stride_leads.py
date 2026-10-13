@@ -38,7 +38,7 @@ REASON_UNCLEAR = "Unclear change in Stride"
 # first and last name, so a full-name comparison never matched them (seen in testing).
 # Two people in one family share a phone and surname but not a first name + DOB.
 _CANDIDATES_SQL = """
-select p.stride_id, l.id as lead_id
+select p.stride_id, l.id as lead_id, l.phone_e164, l.created_at
 from stride_patients p
 join leads l on l.practice_id=p.practice_id
  and l.stride_patient_id is null
@@ -75,13 +75,15 @@ def link_patients_to_leads(conn, practice_id: int) -> dict[str, int]:
     pairs = conn.execute(_CANDIDATES_SQL, (practice_id,)).fetchall()
     leads_per_patient: dict[int, set[Any]] = {}
     patients_per_lead: dict[Any, set[int]] = {}
+    lead_info: dict[Any, dict] = {}
     for pair in pairs:
         leads_per_patient.setdefault(pair["stride_id"], set()).add(pair["lead_id"])
         patients_per_lead.setdefault(pair["lead_id"], set()).add(pair["stride_id"])
+        lead_info[pair["lead_id"]] = pair
 
     for stride_id, lead_ids in leads_per_patient.items():
-        lead_id = next(iter(lead_ids))
-        if len(lead_ids) > 1 or len(patients_per_lead[lead_id]) > 1:
+        lead_id = _same_person_newest(lead_ids, lead_info) if len(lead_ids) > 1 else next(iter(lead_ids))
+        if lead_id is None or len(patients_per_lead[lead_id]) > 1:
             # Never guess between people: staff can link by hand later.
             conn.execute(
                 "update stride_patients set lead_match_status='ambiguous' "
@@ -107,6 +109,20 @@ def link_patients_to_leads(conn, practice_id: int) -> dict[str, int]:
         (practice_id, [stride_id for stride_id, ids in leads_per_patient.items()]),
     )
     return counts
+
+
+def _same_person_newest(lead_ids: set[Any], lead_info: dict[Any, dict]) -> Any:
+    """Several leads fit one Stride patient: link the newest only when they are one person.
+
+    The same person added to the Sheet again (repeat referral) gives two leads with the same name,
+    birthday and phone; the older one was stopped by hand_over_number. Refusing to choose left the
+    patient unlinked, so a booking never stopped the new lead's calls (seen in testing, 2026-10-14).
+    Leads with different phones may be different people (same name + birthday): never guess.
+    """
+    phones = {lead_info[lead_id]["phone_e164"] for lead_id in lead_ids}
+    if len(phones) != 1 or None in phones:
+        return None
+    return max(lead_ids, key=lambda lead_id: lead_info[lead_id]["created_at"])
 
 
 def mark_leads_booked_from_stride(conn, practice_id: int) -> int:

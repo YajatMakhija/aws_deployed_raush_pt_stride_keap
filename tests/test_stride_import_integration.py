@@ -969,3 +969,16 @@ def test_unmatched_delete_for_a_patient_without_a_lead_changes_nothing(env):
     issues = env.one("select issues from stride_import_files order by id desc limit 1")["issues"]
     assert [i["reason"] for i in issues] == ["delete_unmatched"]
     assert env.one("select count(*) n from leads where practice_id=%s", env.practice_id)["n"] == 0
+
+
+def test_same_person_added_twice_links_the_newest_lead(env):
+    # A4 then B in the test plan: the Sheet re-adds a person (repeat referral), the older lead is
+    # stopped, then the patient books. Two leads fit; same phone means one person: link the newest.
+    older = env.lead("Twice Added")
+    env.db.execute("update leads set cadence_state='terminated',created_at=now()-interval '1 hour' where id=%s",
+                   (older,))
+    newer = env.lead("Twice Added")
+    counts = _import_patient_with_appointment(env, first="Twice", last="Added")
+    assert counts["leads_linked"] == 1 and counts["leads_ambiguous"] == 0
+    assert env.one("select status from leads where id=%s", newer)["status"] == "booked"
+    assert env.one("select stride_patient_id from leads where id=%s", older)["stride_patient_id"] is None
