@@ -163,7 +163,8 @@ Settings (`.env`, defaults shown): `STRIDE_IMPORT_ENABLED=false`, `STRIDE_PRACTI
 2. Store notes / insurance files at all (sensitive, not used yet)? Waiting on senior.
 3. Storage option (separate disk vs today).
 4. Dashboard page design (in `rpt_frontend` style, Salesforce-like flags).
-5. Phase 2B (Keap): needs Michelle's tag and field IDs and the Keap OAuth code.
+5. Phase 2A/2B (Keap): built and tested against the sandbox (2026-10-14); see `PHASE_2A_KEAP_DATA.md` /
+   `PHASE_2B_KEAP_DELIVERY.md`. Waiting on the real Rausch appointment types and Michelle's confirmations.
 
 ## 12. Run it locally
 

@@ -67,6 +67,13 @@ class JsonFormatter(logging.Formatter):
 _configured = False
 
 
+def quiet_http_libraries() -> None:
+    """httpx logs every request url at INFO. Some urls carry an email or phone in the query
+    string (Keap contact search), URL-encoded so the redaction regexes cannot see it."""
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def configure_logging(service: str) -> None:
     global _configured
     if _configured:
@@ -89,6 +96,7 @@ def configure_logging(service: str) -> None:
     )
     file_handler.setFormatter(formatter)
     root.handlers[:] = [console, file_handler]
+    quiet_http_libraries()
     logging.getLogger("rpt_agent").info(
         "logging_configured", extra={"service": service, "event": "logging_configured"}
     )

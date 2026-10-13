@@ -32,6 +32,7 @@ rpt-worker = "rpt_agent.worker:main"
 rpt-sheet-worker = "rpt_agent.sheet_sync_worker:main"
 rpt-stride-worker = "rpt_agent.stride_import_worker:main"
 rpt-booking-worker = "rpt_agent.booking_worker:main"
+rpt-keap-worker = "rpt_agent.keap_sync_worker:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rpt_agent"]
