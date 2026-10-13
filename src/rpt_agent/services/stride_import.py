@@ -53,6 +53,8 @@ class ApplyResult:
     applied: int = 0
     unchanged: int = 0
     issues: list[dict[str, Any]] = field(default_factory=list)
+    # Patients whose appointment Delete matched no visit or several: their lead may still look booked.
+    unclear_delete_patients: set[int] = field(default_factory=set)
 
     def issue(self, row_number: int, stride_id: Any, reason: str) -> None:
         # PHI-free on purpose: this lands in the database and the logs.
@@ -390,6 +392,8 @@ def _parse_row(spec: EntitySpec, row: dict[str, str], tz: ZoneInfo) -> tuple[str
         if spec.table != "stride_appointments":
             raise RowError(f"delete is missing {spec.id_column}")
         values.update(_appointment_slot(row, tz))
+        # Kept only so an unmatched delete can be traced to the patient's lead (never written).
+        values["patient_stride_id"] = _int(row.get("Patient Id"))
         if values["case_stride_id"] is None:
             raise RowError("delete has neither Appointment Id nor Case Id")
     return action, values
@@ -430,7 +434,8 @@ def _resolve_slot_deletes(conn, params: dict[str, Any], result: ApplyResult) -> 
 
     conn.execute(
         "create temp table _slot_matches on commit drop as "
-        "select d.seq,d.row_no,count(distinct c.stride_id) as matches,min(c.stride_id) as stride_id "
+        "select d.seq,d.row_no,d.patient_stride_id,count(distinct c.stride_id) as matches,"
+        "min(c.stride_id) as stride_id "
         "from _stage d left join ("
         " select d2.seq,t.stride_id from _stage d2 join stride_appointments t "
         f"  on t.practice_id=%(practice_id)s and t.deleted_at is null and {same_slot('t')} "
@@ -438,11 +443,16 @@ def _resolve_slot_deletes(conn, params: dict[str, Any], result: ApplyResult) -> 
         " union "
         f" select d2.seq,u.stride_id from _stage d2 join _stage u on u.action='upsert' and u.seq<d2.seq "
         f"  and {same_slot('u')} where d2.action='delete' and d2.stride_id is null"
-        ") c on c.seq=d.seq where d.action='delete' and d.stride_id is null group by d.seq,d.row_no",
+        ") c on c.seq=d.seq where d.action='delete' and d.stride_id is null "
+        "group by d.seq,d.row_no,d.patient_stride_id",
         params,
     )
-    for row in conn.execute("select row_no,matches from _slot_matches where matches<>1 order by row_no"):
+    for row in conn.execute(
+        "select row_no,matches,patient_stride_id from _slot_matches where matches<>1 order by row_no"
+    ):
         result.issue(row["row_no"], None, "delete_unmatched" if row["matches"] == 0 else "delete_ambiguous")
+        if row["patient_stride_id"] is not None:
+            result.unclear_delete_patients.add(row["patient_stride_id"])
     conn.execute(
         "update _stage s set stride_id=m.stride_id from _slot_matches m where s.seq=m.seq and m.matches=1"
     )

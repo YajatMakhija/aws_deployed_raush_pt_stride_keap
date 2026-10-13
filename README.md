@@ -220,7 +220,7 @@ $env:PYTHONPATH = "src"
 python scripts/generate_test_usage_report.py
 ```
 
-The generated report is [testing_updates/CLIENT_TEST_USAGE.md](testing_updates/CLIENT_TEST_USAGE.md).
+The generated report is [docs/CLIENT_TEST_USAGE.md](docs/CLIENT_TEST_USAGE.md).
 Provider invoices remain the accounting source of truth because prices can settle or be adjusted later.
 
 ## Commands and verification

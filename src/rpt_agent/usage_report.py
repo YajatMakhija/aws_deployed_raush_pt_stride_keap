@@ -14,7 +14,7 @@ from .config import get_settings
 from .db import transaction
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REPORT = ROOT / "testing_updates" / "CLIENT_TEST_USAGE.md"
+DEFAULT_REPORT = ROOT / "docs" / "CLIENT_TEST_USAGE.md"
 
 
 def recipient_label(phone: str, secret: str) -> str:

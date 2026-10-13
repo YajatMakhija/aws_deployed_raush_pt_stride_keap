@@ -29,6 +29,7 @@ REASON_CANCELLED = "Cancelled in Stride"
 REASON_LATE_CANCEL = "Late cancel in Stride"
 REASON_NO_SHOW = "No show in Stride"
 REASON_REMOVED = "Appointment removed in Stride"
+REASON_UNCLEAR = "Unclear change in Stride"
 
 # Same person: the names agree AND (same date of birth, or - only when either side
 # has no DOB - the lead's phone is one of the patient's phones). Names agree when the
@@ -37,7 +38,7 @@ REASON_REMOVED = "Appointment removed in Stride"
 # first and last name, so a full-name comparison never matched them (seen in testing).
 # Two people in one family share a phone and surname but not a first name + DOB.
 _CANDIDATES_SQL = """
-select p.stride_id, l.id as lead_id
+select p.stride_id, l.id as lead_id, l.phone_e164, l.created_at
 from stride_patients p
 join leads l on l.practice_id=p.practice_id
  and l.stride_patient_id is null
@@ -74,13 +75,15 @@ def link_patients_to_leads(conn, practice_id: int) -> dict[str, int]:
     pairs = conn.execute(_CANDIDATES_SQL, (practice_id,)).fetchall()
     leads_per_patient: dict[int, set[Any]] = {}
     patients_per_lead: dict[Any, set[int]] = {}
+    lead_info: dict[Any, dict] = {}
     for pair in pairs:
         leads_per_patient.setdefault(pair["stride_id"], set()).add(pair["lead_id"])
         patients_per_lead.setdefault(pair["lead_id"], set()).add(pair["stride_id"])
+        lead_info[pair["lead_id"]] = pair
 
     for stride_id, lead_ids in leads_per_patient.items():
-        lead_id = next(iter(lead_ids))
-        if len(lead_ids) > 1 or len(patients_per_lead[lead_id]) > 1:
+        lead_id = _same_person_newest(lead_ids, lead_info) if len(lead_ids) > 1 else next(iter(lead_ids))
+        if lead_id is None or len(patients_per_lead[lead_id]) > 1:
             # Never guess between people: staff can link by hand later.
             conn.execute(
                 "update stride_patients set lead_match_status='ambiguous' "
@@ -108,6 +111,20 @@ def link_patients_to_leads(conn, practice_id: int) -> dict[str, int]:
     return counts
 
 
+def _same_person_newest(lead_ids: set[Any], lead_info: dict[Any, dict]) -> Any:
+    """Several leads fit one Stride patient: link the newest only when they are one person.
+
+    The same person added to the Sheet again (repeat referral) gives two leads with the same name,
+    birthday and phone; the older one was stopped by hand_over_number. Refusing to choose left the
+    patient unlinked, so a booking never stopped the new lead's calls (seen in testing, 2026-10-14).
+    Leads with different phones may be different people (same name + birthday): never guess.
+    """
+    phones = {lead_info[lead_id]["phone_e164"] for lead_id in lead_ids}
+    if len(phones) != 1 or None in phones:
+        return None
+    return max(lead_ids, key=lambda lead_id: lead_info[lead_id]["created_at"])
+
+
 def mark_leads_booked_from_stride(conn, practice_id: int) -> int:
     """A linked lead with a future appointment that is still on is booked: stop outreach.
 
@@ -120,6 +137,10 @@ def mark_leads_booked_from_stride(conn, practice_id: int) -> int:
         "join stride_appointments a on a.practice_id=p.practice_id "
         " and a.patient_stride_id=p.stride_id and a.deleted_at is null "
         " and a.start_utc>now() and lower(coalesce(a.status,'')) <> all(%s) "
+        # A lead flagged for a Stride problem is booked again only by a visit that changed after
+        # the flag (a real rebook), never by one it already had (e.g. the twin of an unclear delete).
+        " and (l.status<>'needs_attention' or coalesce(l.review_reason,'') not like '%% in Stride' "
+        "  or a.updated_at>l.status_changed_at) "
         "where l.practice_id=%s and l.status<>'booked' order by l.id,a.start_utc",
         (list(_MISSED), practice_id),
     ).fetchall()
@@ -222,6 +243,39 @@ def _missed_reason(removed: bool, status: str) -> str:
     if status in LATE_CANCEL_STATUSES:
         return REASON_LATE_CANCEL
     return REASON_CANCELLED
+
+
+def flag_unclear_deletes(conn, practice_id: int, patient_ids: set[int]) -> int:
+    """A Stride Delete we could not match to one visit: tell staff instead of guessing.
+
+    Real Stride never has two visits in one case at one start time, so this should not happen; when
+    it did (Mock Stride allowed it, 2026-10-13) the visit stayed active here, the lead stayed Booked,
+    and every later cancel or no-show was hidden behind it. Only booked leads are flagged.
+    """
+    if not patient_ids:
+        return 0
+    rows = conn.execute(
+        "select l.id,l.status_changed_at from leads l join stride_patients p on p.lead_id=l.id "
+        "where p.practice_id=%s and p.stride_id=any(%s) and l.status='booked' and not l.needs_review "
+        "for update of l",
+        (practice_id, sorted(patient_ids)),
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "update leads set status='needs_attention',needs_review=true,review_reason=%s,"
+            "review_flagged_at=now(),status_reason=%s,status_changed_at=now(),updated_at=now() where id=%s",
+            (REASON_UNCLEAR, REASON_UNCLEAR, row["id"]),
+        )
+        conn.execute(
+            "insert into lead_status_history(lead_id,from_status,to_status,source,reason) "
+            "values(%s,'booked','needs_attention','stride',%s)",
+            (row["id"], REASON_UNCLEAR),
+        )
+        enqueue_sheet_update(
+            conn, lead_id=str(row["id"]), event_type="stride_booking_cancelled",
+            source_key=f"stride:unclear:{row['id']}:{row['status_changed_at']}",
+        )
+    return len(rows)
 
 
 def reconcile_leads(conn, practice_id: int) -> dict[str, int]:

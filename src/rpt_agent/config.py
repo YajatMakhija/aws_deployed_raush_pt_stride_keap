@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     mock_scenario: str = "success"
     request_timeout_seconds: float = 10.0
     db_pool_timeout_seconds: float = 5.0
+    # Supabase's session pooler allows only 15 clients in total, shared by every
+    # container and local script, so each process keeps a small pool.
+    db_pool_max_size: int = Field(default=3, ge=1, le=20)
+    db_pool_max_idle_seconds: float = 60.0
     http_retry_attempts: int = Field(default=3, ge=1, le=5)
     http_retry_base_seconds: float = Field(default=0.5, ge=0.1, le=5.0)
     retry_max_attempts: int = Field(default=5, ge=1, le=20)
