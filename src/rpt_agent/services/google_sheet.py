@@ -315,16 +315,19 @@ class GoogleSheetBackend:
         if archive.col_count < width:
             requests.append({"appendDimension": {"sheetId": archive.id, "dimension": "COLUMNS",
                                                  "length": width - archive.col_count}})
-        ordered = sorted(numbers)
+        spans = _spans(sorted(set(numbers)))  # neighbouring rows move as one block
         requests.append({"insertDimension": {"range": {
             "sheetId": archive.id, "dimension": "ROWS", "startIndex": header_row,
-            "endIndex": header_row + len(ordered)}, "inheritFromBefore": False}})
-        for offset, number in enumerate(ordered):
-            requests.append(_copy(main.id, archive.id, number - 1, header_row + offset, 1, width))
-        for number in reversed(ordered):  # bottom up, so earlier row numbers stay valid
+            "endIndex": header_row + sum(last - first + 1 for first, last in spans)},
+            "inheritFromBefore": False}})
+        offset = header_row
+        for first, last in spans:
+            requests.append(_copy(main.id, archive.id, first - 1, offset, last - first + 1, width))
+            offset += last - first + 1
+        for first, last in reversed(spans):  # bottom up, so earlier row numbers stay valid
             requests.append({"deleteDimension": {"range": {
-                "sheetId": main.id, "dimension": "ROWS", "startIndex": number - 1,
-                "endIndex": number}}})
+                "sheetId": main.id, "dimension": "ROWS", "startIndex": first - 1,
+                "endIndex": last}}})
         book.batch_update({"requests": requests})
 
 

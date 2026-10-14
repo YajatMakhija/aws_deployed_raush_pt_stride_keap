@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # Most polls read only five narrow columns; the profile-edit check needs every column and
     # runs on a full read this often.
     sheet_full_read_seconds: int = Field(default=300, ge=30, le=86400)
+    # A command row runs only once its cells stayed unchanged this long (staff still typing).
+    sheet_settle_seconds: int = Field(default=60, ge=0, le=3600)
+    # Commands started per poll; the rest of a big pasted block waits for the next polls.
+    sheet_max_commands_per_poll: int = Field(default=50, ge=1, le=1000)
     # Nightly archive: rows of finished leads (booked, do not contact, declined, closed, wrong
     # number, or cadence over) untouched for SHEET_ARCHIVE_DAYS move to the archive tab at
     # SHEET_ARCHIVE_HOUR (Pacific). Off until the clinic agrees.

@@ -296,8 +296,11 @@ def run_direct_tick(backend: SheetBackend, *, full: bool | None = None) -> dict[
             lock.autocommit = False  # hand the pooled connection back as we found it
 
 
-# When the last full read ran (monotonic seconds; 0 = never) and the last archive day (Pacific).
-_direct_state: dict[str, Any] = {"last_full": 0.0, "archived_on": None}
+# When the last full read ran (monotonic seconds; 0 = never), the last archive day (Pacific),
+# rows waiting to settle, and the profile fingerprints of the last full read.
+_direct_state: dict[str, Any] = {"last_full": 0.0, "archived_on": None, "settle": None,
+                                 "profiles": None}
+_clock = time.monotonic
 
 
 def _due_outbox_leads(settings: Settings) -> set[str]:
@@ -331,13 +334,18 @@ def _direct_tick(backend: SheetBackend, settings: Settings, counts: dict[str, in
         write_heartbeat(mode="direct", ok=False, error=str(exc))
         return counts
     poll = sheet_direct.PollResult()
-    claims = sheet_direct.claim_commands(grid, trace)
+    settle = _direct_state.get("settle")
+    if settle is None or settle.seconds != settings.sheet_settle_seconds:
+        settle = _direct_state["settle"] = sheet_direct.Settle(settings.sheet_settle_seconds)
+    claims = sheet_direct.claim_commands(grid, trace, settle=settle, now=_clock(),
+                                         limit=settings.sheet_max_commands_per_poll)
     claimed = flush(backend, grid)
     counts["deferred"] += len(claimed.deferred_rows)
     sheet_direct.run_claims(grid, claims, claimed.deferred_rows, poll, trace)
     sheet_direct.recover_stuck(grid, poll, settings.sheet_stuck_seconds, trace)
     if full:
-        sheet_direct.sync_profiles(grid, poll, trace)
+        _direct_state["profiles"] = sheet_direct.sync_profiles(
+            grid, poll, trace, previous=_direct_state.get("profiles") or {})
 
     rows = _claim_sheet_work(settings)
     counts["claimed"] = len(rows)

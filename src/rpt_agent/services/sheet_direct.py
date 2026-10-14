@@ -299,12 +299,53 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def claim_commands(grid: SheetGrid, trace: WorkflowTrace) -> list[tuple[SheetRow, Any, str]]:
-    """Queue "Processing" claims (and validation errors); returns the rows to run after the flush."""
+INPUT = ("name", "phone", "email", "date_of_birth", "location", "case", "action",
+         "outcome_status", "lead_id", "action_request_id")
+
+
+@dataclass
+class Settle:
+    """A command row runs only after its cells stayed the same for `seconds`.
+
+    Staff fill a row over a minute or two and may pick the Action before they finish: acting
+    on the first poll that sees "Start cadence" would start a half-typed row or show an error.
+    Remembered per row in memory; a worker restart only delays rows by one settle period.
+    """
+    seconds: float
+    seen: dict[int, tuple[str, float]] = field(default_factory=dict)
+
+    def ready(self, row: SheetRow, now: float) -> bool:
+        if self.seconds <= 0:
+            return True
+        fingerprint = hashlib.sha256(
+            "\x1f".join(" ".join(row.get(k).split()) for k in INPUT).encode()).hexdigest()
+        first = self.seen.get(row.number)
+        if first is None or first[0] != fingerprint:
+            self.seen[row.number] = (fingerprint, now)
+            return False
+        return now - first[1] >= self.seconds
+
+    def keep(self, numbers: set[int]) -> None:
+        self.seen = {n: v for n, v in self.seen.items() if n in numbers}
+
+
+def claim_commands(grid: SheetGrid, trace: WorkflowTrace, *, settle: Settle | None = None,
+                   now: float = 0.0, limit: int | None = None) -> list[tuple[SheetRow, Any, str]]:
+    """Queue "Processing" claims (and validation errors); returns the rows to run after the flush.
+
+    At most `limit` commands per poll (top rows first): a pasted block of thousands of rows is
+    worked through over several polls instead of one poll that blocks everything else.
+    """
     claims = []
+    waiting: set[int] = set()
     for row in grid.rows:
         command = command_of(row)
         if not command or not needs_processing(row, command):
+            continue
+        waiting.add(row.number)
+        if settle is not None and not settle.ready(row, now):
+            continue
+        if limit is not None and len(claims) >= limit:
             continue
         label, action = command
         request, error = build_action(row, action)
@@ -320,6 +361,8 @@ def claim_commands(grid: SheetGrid, trace: WorkflowTrace) -> list[tuple[SheetRow
         grid.set(row, "action_started_at", _now().isoformat().replace("+00:00", "Z"))
         grid.set(row, "outcome_status", f"Processing: {label}")
         claims.append((row, request, request_id))
+    if settle is not None:
+        settle.keep(waiting)
     return claims
 
 
@@ -441,8 +484,15 @@ def _write_outcome(grid: SheetGrid, row: SheetRow, outcome: Outcome,
         result.baselines[lead_id] = (profile_hash(row), row.number)
 
 
-def sync_profiles(grid: SheetGrid, result: PollResult, trace: WorkflowTrace) -> None:
-    """Send changed Name/Phone/Email/DOB/Location/Case of linked rows (n8n lead-sync flow)."""
+def sync_profiles(grid: SheetGrid, result: PollResult, trace: WorkflowTrace,
+                  previous: dict[str, str] | None = None) -> dict[str, str]:
+    """Send changed Name/Phone/Email/DOB/Location/Case of linked rows (n8n lead-sync flow).
+
+    `previous` = fingerprints from the last full read. An edit is sent only once it looks the
+    same on two full reads in a row, so a row caught half-edited (new name typed, phone not yet)
+    is never flagged for review. Returns this read's fingerprints for the next call; None skips
+    the wait (tests, one-off runs).
+    """
     from ..routes.n8n import SheetLeadInput  # local: routes import services
 
     first: dict[str, SheetRow] = {}
@@ -450,8 +500,9 @@ def sync_profiles(grid: SheetGrid, result: PollResult, trace: WorkflowTrace) -> 
         lead_id = row.get("lead_id")
         if lead_id and _is_uuid(lead_id) and row.number not in result.handled:
             first.setdefault(lead_id, row)  # duplicate Lead ID rows: the first one counts
+    seen_now = {lead_id: profile_hash(row) for lead_id, row in first.items()}
     if not first:
-        return
+        return seen_now
     with transaction() as conn:
         stored = {
             str(r["lead_id"]): r["profile_hash"]
@@ -469,6 +520,8 @@ def sync_profiles(grid: SheetGrid, result: PollResult, trace: WorkflowTrace) -> 
             continue
         if stored[lead_id] == fingerprint:
             continue
+        if previous is not None and previous.get(lead_id) != fingerprint:
+            continue  # changed since the last full read: wait until it holds still
         phone, dob = normalize_phone(row.get("phone")), normalize_dob(row.get("date_of_birth"))
         email = row.get("email").lower()
         errors = []
@@ -504,6 +557,7 @@ def sync_profiles(grid: SheetGrid, result: PollResult, trace: WorkflowTrace) -> 
                 grid.set(row, "outcome_status", "Error: " + str(detail or "request rejected")[:180])
         baselines[lead_id] = (fingerprint, row.number)
         result.counts["profiles"] += 1
+    return seen_now
 
 
 def _save_baseline(items: dict[str, tuple[str, int]]) -> None:
@@ -573,6 +627,8 @@ def needs_attention(row: SheetRow) -> bool:
     return status.casefold().startswith("processing: ") or bool(RETRYING.match(status))
 
 
+# Rows moved per night: keeps the single Sheets request small; the rest go the next night.
+ARCHIVE_MAX_ROWS = 2000
 ARCHIVE_LEAD_STATUSES = ["booked", "do_not_contact", "declined", "closed_no_response",
                          "invalid_phone"]
 
@@ -597,7 +653,7 @@ def archive_candidates(grid: SheetGrid, days: int) -> list[SheetRow]:
 def archive(backend: SheetBackend, grid: SheetGrid, days: int, tab: str,
             trace: WorkflowTrace) -> int:
     """Move finished rows to the archive tab. Rows that moved since the read are left alone."""
-    rows = archive_candidates(grid, days)
+    rows = archive_candidates(grid, days)[:ARCHIVE_MAX_ROWS]
     if not rows:
         return 0
     fresh = backend.read_rows(sorted({grid.header_row, *(r.number for r in rows)}))

@@ -2081,3 +2081,15 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   `SHEET_ARCHIVE_DAYS` move to the top of tab `GOOGLE_SHEET_ARCHIVE_TAB` in one all-or-nothing Sheets
   request (copy with formatting, then delete). `sheet_row_state.archived_at` (migration 044) marks them;
   later Sheet updates for an archived lead are dropped quietly. `rpt sheet-archive [--days N] [--apply]`.
+
+### 2026-10-15 — Sheet sync: settle time, per-poll limit, load-tested at 10,000 rows
+- Settle: a command row runs only after its cells stayed unchanged for `SHEET_SETTLE_SECONDS` (60), so a
+  half-typed row with the Action already picked neither starts early nor shows an error. Profile edits
+  are sent only when the same on two full reads in a row (a row caught mid-edit is never flagged).
+- `SHEET_MAX_COMMANDS_PER_POLL` (50): a pasted block is worked through over several polls (at the Seoul
+  DB latency ~0.3–0.5 s per start, 50 keeps a poll near 25 s). Archive moves neighbouring rows as one
+  block, at most 2,000 rows a night.
+- `scripts/sheet_load_test.py` (local DB only): 10,000 pasted Start rows → 10,000 leads, exactly once,
+  50 polls of ≤0.27 s; 100 profile edits synced; archive verified. Live Google timing (from India, our
+  code, 10,000 rows × 17 columns in a temporary tab): full read 1.2 s, narrow scan 1.4 s, load 50 rows
+  0.4 s, write 100 cells 0.9 s, archive 1,000 scattered rows 6 s (one atomic request).

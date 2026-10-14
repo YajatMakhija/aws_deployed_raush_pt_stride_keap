@@ -36,12 +36,13 @@ def env(monkeypatch):
     for key, value in {
         "SUPABASE_DB_URL": url, "N8N_PRACTICE_SLUG": slug, "SHEET_SYNC_ENABLED": "true",
         "SHEET_SYNC_MODE": "direct", "DASHBOARD_PUBLIC_URL": "https://dash.example.test",
-        "GOOGLE_SHEET_ID": "sheet", "SHEET_STUCK_SECONDS": "120",
+        "GOOGLE_SHEET_ID": "sheet", "SHEET_STUCK_SECONDS": "120", "SHEET_SETTLE_SECONDS": "0",
     }.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
     get_pool.cache_clear()
-    monkeypatch.setattr(sheet_sync_worker, "_direct_state", {"last_full": 0.0, "archived_on": None})
+    monkeypatch.setattr(sheet_sync_worker, "_direct_state",
+                        {"last_full": 0.0, "archived_on": None, "settle": None, "profiles": None})
     conn = psycopg.connect(url, row_factory=dict_row, autocommit=True)
     practice = conn.execute(
         "insert into practices(name,slug,timezone) values('Synthetic',%s,'America/Los_Angeles') "
@@ -189,10 +190,13 @@ def test_profile_edits_sync_and_a_name_change_goes_to_review(env):
     env.sheet.set(number, "email", "new@example.test")
     env.sheet.set(number, "case", "Pelvic")
     env.tick()
+    assert env.lead(lead_id)["email"] == "asha@example.test"  # seen once: wait for it to hold
+    env.tick()
     lead = env.lead(lead_id)
     assert lead["email"] == "new@example.test" and lead["lead_type"] == "Pelvic"
     assert env.cell(number, "outcome_status") == "Cadence started"  # success writes nothing
     env.sheet.set(number, "name", "Asha Kumar")
+    env.tick()
     env.tick()
     assert env.cell(number, "outcome_status") == "Name changed; needs review"
     assert env.cell(number, "lead_status") == "Needs Review"
@@ -351,9 +355,55 @@ def test_profile_edits_wait_for_the_full_read(env):
     lead_id = env.cell(number, "lead_id")
     env.sheet.set(number, "email", "later@example.test")
     env.tick(full=False)
+    env.tick(full=False)
     assert env.lead(lead_id)["email"] == "asha@example.test"
     env.tick(full=True)
+    env.tick(full=True)
     assert env.lead(lead_id)["email"] == "later@example.test"
+
+
+def test_a_half_edited_row_is_never_sent_as_a_name_change(env):
+    # Staff retype a row over two full reads: the name first, the corrected phone later.
+    number = env.start_row()
+    env.tick()
+    lead_id = env.cell(number, "lead_id")
+    env.tick()
+    env.sheet.set(number, "name", "Asha R")       # caught mid-edit by one full read
+    env.tick()
+    env.sheet.set(number, "name", "Asha Rao")     # finished: back to the stored name
+    env.tick()
+    env.tick()
+    assert env.lead(lead_id)["needs_review"] is False
+    assert env.cell(number, "outcome_status") == "Cadence started"
+
+
+def test_a_command_waits_until_the_row_stops_changing(env, monkeypatch):
+    monkeypatch.setattr(get_settings(), "sheet_settle_seconds", 60)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(sheet_sync_worker, "_clock", lambda: clock["t"])
+    number = env.start_row(date_of_birth="")  # Action picked before the row is finished
+    env.tick(full=False)
+    assert env.cell(number, "outcome_status") == ""  # no error yet: staff are still typing
+    clock["t"] += 30
+    env.sheet.set(number, "date_of_birth", "16/01/1990")  # finished 30 s later
+    env.tick(full=False)
+    clock["t"] += 45
+    env.tick(full=False)
+    assert env.cell(number, "outcome_status") == "" and env.leads() == []  # 45 s still: wait
+    clock["t"] += 20
+    env.tick(full=False)
+    assert env.cell(number, "outcome_status") == "Cadence started" and len(env.leads()) == 1
+
+
+def test_a_pasted_block_is_worked_through_a_few_rows_per_poll(env, monkeypatch):
+    monkeypatch.setattr(get_settings(), "sheet_max_commands_per_poll", 3)
+    numbers = [env.start_row(name=f"Patient {i}") for i in range(7)]
+    env.tick(full=False)
+    assert len(env.leads()) == 3
+    env.tick(full=False)
+    env.tick(full=False)
+    assert len(env.leads()) == 7
+    assert all(env.cell(n, "outcome_status") == "Cadence started" for n in numbers)
 
 
 # --- nightly archive ------------------------------------------------------------------------
