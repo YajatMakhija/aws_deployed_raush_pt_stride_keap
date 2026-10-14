@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     # A row left "Processing"/"Retrying" this long (worker stopped mid-command) is retried
     # with the same Action Request ID, which replays the stored result.
     sheet_stuck_seconds: int = Field(default=120, ge=30, le=3600)
+    # Most polls read only five narrow columns; the profile-edit check needs every column and
+    # runs on a full read this often.
+    sheet_full_read_seconds: int = Field(default=300, ge=30, le=86400)
+    # Nightly archive: rows of finished leads (booked, do not contact, declined, closed, wrong
+    # number, or cadence over) untouched for SHEET_ARCHIVE_DAYS move to the archive tab at
+    # SHEET_ARCHIVE_HOUR (Pacific). Off until the clinic agrees.
+    sheet_archive_enabled: bool = False
+    sheet_archive_days: int = Field(default=30, ge=1, le=3650)
+    sheet_archive_hour: int = Field(default=3, ge=0, le=23)
+    google_sheet_archive_tab: str = "Archive"
     # Stride CSV exports arrive over SFTP into the inbox; the stride-worker moves
     # each file to archive (imported) or error (unusable) once it is done.
     stride_import_enabled: bool = False

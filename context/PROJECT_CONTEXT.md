@@ -2069,3 +2069,15 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   first name) holds through an older lead counts for the newest lead, so a repeat referral before the
   visit stays booked in Keap. "Superseded" now also requires the same first name (family members share
   phones), and a superseded lead row is skipped even when a Stride patient is linked.
+
+### 2026-10-15 — Sheet sync stays cheap at 100k+ rows; nightly archive
+- Narrow polls: every 30 s the sheet-worker reads only Action, Outcome Status, Lead ID, Action Request ID
+  and Action Started At (`google_sheet.scan`), then loads just the rows that need work (commands, stuck
+  rows, rows with results waiting). A full read runs every `SHEET_FULL_READ_SECONDS` (300) for profile
+  edits. The pre-write check now reads only the target rows + header row.
+- Nightly archive (`SHEET_ARCHIVE_ENABLED`, off by default until the clinic agrees): at
+  `SHEET_ARCHIVE_HOUR` (Pacific) rows whose lead is finished by the database (booked, do not contact,
+  declined, closed, wrong number, or cadence completed/terminated; no open review) and unchanged for
+  `SHEET_ARCHIVE_DAYS` move to the top of tab `GOOGLE_SHEET_ARCHIVE_TAB` in one all-or-nothing Sheets
+  request (copy with formatting, then delete). `sheet_row_state.archived_at` (migration 044) marks them;
+  later Sheet updates for an archived lead are dropped quietly. `rpt sheet-archive [--days N] [--apply]`.

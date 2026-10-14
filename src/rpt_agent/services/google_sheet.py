@@ -1,12 +1,15 @@
 """Read and write the outreach Google Sheet directly (replaces the n8n Sheet workflows).
 
-The Sheets API has no row ids or change events, so every poll reads the whole tab (one
-request, ~200 KB for 1,000 rows) and finds columns by their header text, never by letter:
-staff move columns. Rows are addressed by row number, which staff can shift at any time by
-inserting, deleting or sorting rows. So no write trusts the read it came from: just before
-writing, the identity cells of every target row (Lead ID, Action Request ID, Name, Phone) are
-read again and any row that moved is left for the next poll. A write can never land on the
-wrong patient's row.
+The Sheets API has no row ids or change events. Columns are found by their header text, never
+by letter (staff move columns). Most polls only `scan` five narrow columns (Action, Outcome
+Status, Lead ID, Action Request ID, Action Started At: ~2 MB even at 200,000 rows) and then
+`load_rows` the few rows that need work; a full read of the tab is for the slower profile
+check and the nightly archive.
+
+Rows are addressed by row number, which staff can shift at any time by inserting, deleting or
+sorting rows. So no write trusts the read it came from: just before writing, the target rows
+and the header row are read again and any row that moved (or a moved column) is left for the
+next poll. A write can never land on the wrong patient's row.
 """
 
 from __future__ import annotations
@@ -42,6 +45,10 @@ REQUIRED = ("name", "phone", "action", "outcome_status", "action_request_id",
             "action_started_at", "lead_id")
 # Cells that tell whose row this is. Checked again right before every write.
 IDENTITY = ("lead_id", "action_request_id", "name", "phone")
+# Enough to decide which rows need work this poll (commands, stuck rows, results to write).
+SCAN = ("action", "outcome_status", "lead_id", "action_request_id", "action_started_at")
+# Rows per batchGet request (ranges go in the URL).
+READ_CHUNK = 100
 
 
 class SheetLayoutError(RuntimeError):
@@ -49,11 +56,15 @@ class SheetLayoutError(RuntimeError):
 
 
 class SheetBackend(Protocol):
-    def read_values(self) -> list[list[str]]: ...
+    def read_values(self) -> list[list[Any]]: ...
 
-    def read_columns(self, letters: list[str]) -> dict[str, list[str]]: ...
+    def read_rows(self, numbers: list[int]) -> dict[int, list[Any]]: ...
+
+    def read_columns(self, letters: list[str]) -> dict[str, list[Any]]: ...
 
     def write_cells(self, cells: list[tuple[str, str]]) -> None: ...
+
+    def archive_rows(self, numbers: list[int], header_row: int, archive_tab: str) -> None: ...
 
 
 def column_letter(index: int) -> str:
@@ -103,26 +114,64 @@ class SheetGrid:
         row.cells[key] = text
 
 
-def parse_grid(values: list[list[str]], header_row: int) -> SheetGrid:
-    if len(values) < header_row:
-        raise SheetLayoutError(f"the Sheet has no header row {header_row}")
+def header_columns(header: list[Any]) -> dict[str, int]:
     wanted = {name.strip().casefold(): key for key, name in COLUMNS.items()}
     columns: dict[str, int] = {}
-    for index, title in enumerate(values[header_row - 1]):
-        key = wanted.get(str(title).strip().casefold())
+    for index, title in enumerate(header):
+        key = wanted.get(as_text(title).strip().casefold())
         if key and key not in columns:
             columns[key] = index
     missing = [COLUMNS[key] for key in REQUIRED if key not in columns]
     if missing:
         raise SheetLayoutError("the Sheet is missing column(s): " + ", ".join(missing))
-    rows = []
-    for offset, raw in enumerate(values[header_row:], start=header_row + 1):
-        cells = {key: (as_text(raw[i]) if i < len(raw) else "") for key, i in columns.items()}
-        if any(value.strip() for value in cells.values()):
-            row = SheetRow(offset, cells)
-            row.seen = row.identity()
-            rows.append(row)
+    return columns
+
+
+def _row(number: int, raw: list[Any], columns: dict[str, int]) -> SheetRow | None:
+    cells = {key: (as_text(raw[i]) if i < len(raw) else "") for key, i in columns.items()}
+    if not any(value.strip() for value in cells.values()):
+        return None
+    row = SheetRow(number, cells)
+    row.seen = row.identity()
+    return row
+
+
+def parse_grid(values: list[list[Any]], header_row: int) -> SheetGrid:
+    """The whole tab (full read): every non-blank row."""
+    if len(values) < header_row:
+        raise SheetLayoutError(f"the Sheet has no header row {header_row}")
+    columns = header_columns(values[header_row - 1])
+    rows = [row for number, raw in enumerate(values[header_row:], start=header_row + 1)
+            if (row := _row(number, raw, columns))]
     return SheetGrid(columns, rows, header_row)
+
+
+def scan(backend: SheetBackend, header_row: int) -> tuple[dict[str, int], list[SheetRow]]:
+    """Header + the five SCAN columns of every row. Rows carry only those cells."""
+    header = backend.read_rows([header_row]).get(header_row) or []
+    columns = header_columns(header)
+    letters = {key: column_letter(columns[key]) for key in SCAN}
+    fresh = backend.read_columns(sorted(set(letters.values())))
+    length = max((len(values) for values in fresh.values()), default=0)
+    rows = []
+    for number in range(header_row + 1, length + 1):
+        cells = {key: as_text(_cell(fresh.get(letter, []), number)) for key, letter in letters.items()}
+        if any(value.strip() for value in cells.values()):
+            rows.append(SheetRow(number, cells))
+    return columns, rows
+
+
+def load_rows(backend: SheetBackend, grid: SheetGrid, numbers: set[int]) -> None:
+    """Add the full content of these rows to the grid (rows already in it are kept as they are)."""
+    have = {row.number for row in grid.rows}
+    wanted = sorted(set(numbers) - have)
+    if not wanted:
+        return
+    fetched = backend.read_rows(wanted)
+    for number in wanted:
+        if row := _row(number, fetched.get(number) or [], grid.columns):
+            grid.rows.append(row)
+    grid.rows.sort(key=lambda row: row.number)
 
 
 def as_text(value: Any) -> str:
@@ -144,23 +193,22 @@ def flush(backend: SheetBackend, grid: SheetGrid) -> FlushResult:
     """Write queued cells whose row still holds the same patient; leave moved rows for later."""
     if not grid.pending:
         return FlushResult()
-    letters = {key: grid.letter(key) for key in IDENTITY}
-    used = {key: grid.letter(key) for key in {*IDENTITY, *(key for _, key, _, _ in grid.pending)}
-            if grid.letter(key)}
-    fresh = backend.read_columns(sorted(set(used.values())))
+    used = {key for _, key, _, _ in grid.pending} | set(IDENTITY)
+    fresh = backend.read_rows(sorted({grid.header_row, *(n for n, *_ in grid.pending)}))
+    header = fresh.get(grid.header_row) or []
     cells, deferred = [], set()
     # A column inserted, deleted or moved since the read shifts every letter: write nothing.
     moved = any(
-        as_text(_cell(fresh.get(letter, []), grid.header_row)).strip().casefold()
-        != COLUMNS[key].casefold()
-        for key, letter in used.items()
+        as_text(_cell(header, grid.columns[key] + 1)).strip().casefold() != COLUMNS[key].casefold()
+        for key in used if key in grid.columns
     )
     for number, key, text, expected in grid.pending:
         if moved:
             deferred.add(number)
             continue
+        raw = fresh.get(number) or []
         now = tuple(
-            as_text(_cell(fresh.get(letters[k] or "", []), number)).strip() if letters[k] else ""
+            as_text(_cell(raw, grid.columns[k] + 1)).strip() if k in grid.columns else ""
             for k in IDENTITY
         )
         if not _same_row(expected, now):
@@ -221,6 +269,19 @@ class GoogleSheetBackend:
     def read_values(self) -> list[list[Any]]:
         return self.worksheet.get_all_values(**_READ)
 
+    def read_rows(self, numbers: list[int]) -> dict[int, list[Any]]:
+        out: dict[int, list[Any]] = {}
+        spans = _spans(sorted(set(numbers)))
+        for start in range(0, len(spans), READ_CHUNK):
+            chunk = spans[start:start + READ_CHUNK]
+            ranges = [f"{first}:{last}" for first, last in chunk]
+            result: list[Any] = self.worksheet.batch_get(ranges, major_dimension="ROWS", **_READ)
+            for (first, last), value_range in zip(chunk, result, strict=True):
+                values = list(value_range or [])
+                for offset, number in enumerate(range(first, last + 1)):
+                    out[number] = list(values[offset]) if offset < len(values) else []
+        return out
+
     def read_columns(self, letters: list[str]) -> dict[str, list[Any]]:
         ranges = [f"{letter}:{letter}" for letter in letters]
         result: list[Any] = self.worksheet.batch_get(ranges, major_dimension="COLUMNS", **_READ)
@@ -235,3 +296,54 @@ class GoogleSheetBackend:
             [{"range": cell, "values": [[value]]} for cell, value in cells],
             value_input_option="RAW",
         )
+
+    def archive_rows(self, numbers: list[int], header_row: int, archive_tab: str) -> None:
+        """Move whole rows (values and formatting) to the top of the archive tab, in ONE request.
+
+        A spreadsheet batchUpdate is all-or-nothing, so a row is never deleted without its copy.
+        """
+        import gspread
+
+        book, main = self.worksheet.spreadsheet, self.worksheet
+        width = main.col_count
+        try:
+            archive = book.worksheet(archive_tab)
+        except gspread.WorksheetNotFound:
+            archive = book.add_worksheet(archive_tab, rows=header_row + 1, cols=width)
+            book.batch_update({"requests": [_copy(main.id, archive.id, 0, 0, header_row, width)]})
+        requests: list[dict[str, Any]] = []
+        if archive.col_count < width:
+            requests.append({"appendDimension": {"sheetId": archive.id, "dimension": "COLUMNS",
+                                                 "length": width - archive.col_count}})
+        ordered = sorted(numbers)
+        requests.append({"insertDimension": {"range": {
+            "sheetId": archive.id, "dimension": "ROWS", "startIndex": header_row,
+            "endIndex": header_row + len(ordered)}, "inheritFromBefore": False}})
+        for offset, number in enumerate(ordered):
+            requests.append(_copy(main.id, archive.id, number - 1, header_row + offset, 1, width))
+        for number in reversed(ordered):  # bottom up, so earlier row numbers stay valid
+            requests.append({"deleteDimension": {"range": {
+                "sheetId": main.id, "dimension": "ROWS", "startIndex": number - 1,
+                "endIndex": number}}})
+        book.batch_update({"requests": requests})
+
+
+def _copy(source: int, target: int, source_row: int, target_row: int, rows: int,
+          width: int) -> dict[str, Any]:
+    def grid(sheet: int, first: int) -> dict[str, int]:
+        return {"sheetId": sheet, "startRowIndex": first, "endRowIndex": first + rows,
+                "startColumnIndex": 0, "endColumnIndex": width}
+
+    return {"copyPaste": {"source": grid(source, source_row), "destination": grid(target, target_row),
+                          "pasteType": "PASTE_NORMAL"}}
+
+
+def _spans(numbers: list[int]) -> list[tuple[int, int]]:
+    """[3, 4, 5, 9] -> [(3, 5), (9, 9)]: neighbouring rows share one range."""
+    spans: list[tuple[int, int]] = []
+    for number in numbers:
+        if spans and number == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], number)
+        else:
+            spans.append((number, number))
+    return spans

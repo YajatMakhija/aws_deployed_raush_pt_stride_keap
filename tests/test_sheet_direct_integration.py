@@ -13,8 +13,12 @@ import pytest
 from fake_sheet import FakeSheet
 from psycopg.rows import dict_row
 
+from rpt_agent import sheet_sync_worker
 from rpt_agent.config import get_settings
 from rpt_agent.db import get_pool
+from rpt_agent.observability import WorkflowTrace
+from rpt_agent.services import sheet_direct
+from rpt_agent.services.google_sheet import parse_grid
 from rpt_agent.services.lead_actions import execute_lead_action
 from rpt_agent.services.sheet_sync import enqueue_sheet_update
 from rpt_agent.sheet_sync_worker import run_direct_tick
@@ -37,6 +41,7 @@ def env(monkeypatch):
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
     get_pool.cache_clear()
+    monkeypatch.setattr(sheet_sync_worker, "_direct_state", {"last_full": 0.0, "archived_on": None})
     conn = psycopg.connect(url, row_factory=dict_row, autocommit=True)
     practice = conn.execute(
         "insert into practices(name,slug,timezone) values('Synthetic',%s,'America/Los_Angeles') "
@@ -59,8 +64,8 @@ def env(monkeypatch):
         practice_id = practice
         sheet = FakeSheet()
 
-        def tick(self):
-            return run_direct_tick(self.sheet)
+        def tick(self, full=True):
+            return run_direct_tick(self.sheet, full=full)
 
         def start_row(self, phone=None, **cells):
             values = {"name": "Asha Rao", "phone": phone or _phone(), "email": "asha@example.test",
@@ -308,3 +313,115 @@ def test_only_one_sheet_worker_polls_at_a_time(env):
         holder.close()
     env.tick()
     assert len(env.leads()) == 1
+
+
+# --- narrow polls (no full read) ------------------------------------------------------------
+
+
+def test_a_narrow_poll_runs_a_new_command_without_reading_the_whole_tab(env):
+    for _ in range(50):  # a busy Sheet: finished rows the narrow poll must not load
+        env.sheet.add(name="Old Patient", phone=_phone(), action="Booked", outcome_status="Booked",
+                      lead_id=str(uuid4()))
+    number = env.start_row()
+    env.tick(full=False)
+    assert env.sheet.reads == 0  # never the whole tab
+    assert env.cell(number, "outcome_status") == "Cadence started" and len(env.leads()) == 1
+
+
+def test_a_narrow_poll_writes_results_and_recovers_stuck_rows(env):
+    number = env.start_row()
+    env.tick(full=False)
+    lead_id = env.cell(number, "lead_id")
+    with env.db.transaction():
+        enqueue_sheet_update(env.db, lead_id=lead_id, event_type="cadence_finished",
+                             source_key="narrow")
+    env.db.execute("update leads set cadence_state='completed' where id=%s", (lead_id,))
+    old = (datetime.now(UTC) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    stuck = env.start_row(outcome_status="Processing: Start cadence",
+                          action_request_id=str(uuid4()), action_started_at=old)
+    env.tick(full=False)
+    assert env.cell(number, "outcome_status") == "Cadence completed"
+    assert env.cell(stuck, "outcome_status") == "Cadence started" and len(env.leads()) == 2
+    assert env.sheet.reads == 0
+
+
+def test_profile_edits_wait_for_the_full_read(env):
+    number = env.start_row()
+    env.tick()
+    lead_id = env.cell(number, "lead_id")
+    env.sheet.set(number, "email", "later@example.test")
+    env.tick(full=False)
+    assert env.lead(lead_id)["email"] == "asha@example.test"
+    env.tick(full=True)
+    assert env.lead(lead_id)["email"] == "later@example.test"
+
+
+# --- nightly archive ------------------------------------------------------------------------
+
+
+def _finished(env, number, *, status="booked", days_ago=40, review=False):
+    lead_id = env.cell(number, "lead_id")
+    env.db.execute(
+        "update leads set status=%s,cadence_state='completed',needs_review=%s,"
+        "status_changed_at=now()-make_interval(days=>%s) where id=%s",
+        (status, review, days_ago, lead_id))
+    return lead_id
+
+
+def _archive(env, days=30):
+    grid = parse_grid(env.sheet.read_values(), 2)
+    trace = WorkflowTrace("t", "t")
+    return sheet_direct.archive(env.sheet, grid, days, "Archive", trace)
+
+
+def test_finished_quiet_rows_move_to_the_archive_and_others_stay(env):
+    done = env.start_row(name="Done Patient")
+    recent = env.start_row(name="Recent Patient")
+    review = env.start_row(name="Review Patient")
+    active = env.start_row(name="Active Patient")
+    dnc = env.start_row(name="Dnc Patient")
+    env.tick()
+    done_id = _finished(env, done)
+    _finished(env, recent, days_ago=3)
+    _finished(env, review, review=True)
+    _finished(env, dnc, status="do_not_contact")
+    active_id = env.cell(active, "lead_id")
+    assert _archive(env) == 2
+    names = [row[0] for row in env.sheet.values[2:]]
+    assert names == ["Recent Patient", "Review Patient", "Active Patient"]
+    archived_names = [row[0] for row in env.sheet.archive[2:]]
+    assert sorted(archived_names) == ["Dnc Patient", "Done Patient"]
+    assert env.sheet.archive[1] == env.sheet.values[1]  # same headers
+    state = env.db.execute("select archived_at from sheet_row_state where lead_id=%s",
+                           (done_id,)).fetchone()
+    assert state["archived_at"] is not None
+    # A later update for an archived lead is dropped quietly, not retried as "not found".
+    with env.db.transaction():
+        enqueue_sheet_update(env.db, lead_id=done_id, event_type="lead_booked", source_key="late")
+        enqueue_sheet_update(env.db, lead_id=active_id, event_type="call_settled", source_key="x")
+    env.tick()
+    row = env.db.execute("select status from integration_outbox where aggregate_id=%s "
+                         "and event_type='sheet.lead_booked'", (done_id,)).fetchone()
+    assert row["status"] == "delivered"
+
+
+def test_a_row_that_moved_before_the_archive_is_left_alone(env):
+    done = env.start_row(name="Done Patient")
+    env.tick()
+    _finished(env, done)
+    env.sheet.before_write = lambda: env.sheet.insert_row_above(done)
+    assert _archive(env) == 0 and env.sheet.archive is None
+
+
+def test_the_archive_runs_once_in_its_hour_and_only_when_enabled(env, monkeypatch):
+    settings = get_settings()
+    at = {"now": datetime(2026, 10, 15, 3, 10, tzinfo=sheet_direct.SHEET_TZ)}
+    monkeypatch.setattr(sheet_sync_worker, "_pacific_now", lambda: at["now"])
+    assert not sheet_sync_worker._archive_due(settings)  # off by default
+    monkeypatch.setattr(settings, "sheet_archive_enabled", True)
+    assert sheet_sync_worker._archive_due(settings)
+    sheet_sync_worker._direct_state["archived_on"] = at["now"].date()
+    assert not sheet_sync_worker._archive_due(settings)  # already ran today
+    at["now"] = at["now"].replace(hour=4)
+    sheet_sync_worker._direct_state["archived_on"] = None
+    assert not sheet_sync_worker._archive_due(settings)  # outside the hour

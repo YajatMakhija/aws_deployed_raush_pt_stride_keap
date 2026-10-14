@@ -33,7 +33,7 @@ from pydantic import ValidationError
 
 from ..db import transaction
 from ..observability import WorkflowTrace
-from .google_sheet import SheetGrid, SheetRow
+from .google_sheet import COLUMNS, SheetBackend, SheetGrid, SheetRow, as_text
 from .lead_actions import (
     ActionExecution,
     _replay_stored_response,
@@ -559,6 +559,80 @@ def _lead_status(row: SheetRow, sheet: dict[str, Any]) -> str:
     if ex in {"in cadence", "in_progress", "active"}:
         return "In cadence"
     return explicit or row.get("lead_status")
+
+
+# --- narrow polls and the nightly archive -----------------------------------------------------
+
+
+def needs_attention(row: SheetRow) -> bool:
+    """From the scanned columns alone: a command to run, or one left in progress."""
+    command = command_of(row)
+    if command and needs_processing(row, command):
+        return True
+    status = row.get("outcome_status")
+    return status.casefold().startswith("processing: ") or bool(RETRYING.match(status))
+
+
+ARCHIVE_LEAD_STATUSES = ["booked", "do_not_contact", "declined", "closed_no_response",
+                         "invalid_phone"]
+
+
+def archive_candidates(grid: SheetGrid, days: int) -> list[SheetRow]:
+    """Rows whose lead is finished (by the database, not the Sheet text) and quiet for `days`."""
+    rows = [r for r in grid.rows if _is_uuid(r.get("lead_id")) and not needs_attention(r)]
+    if not rows:
+        return []
+    with transaction() as conn:
+        done = {
+            str(found["id"]) for found in conn.execute(
+                "select id from leads where id=any(%s) and not coalesce(needs_review,false) "
+                "and (status=any(%s) or cadence_state in ('completed','terminated')) "
+                "and coalesce(status_changed_at,updated_at)<now()-make_interval(days=>%s)",
+                ([r.get("lead_id") for r in rows], ARCHIVE_LEAD_STATUSES, days),
+            )
+        }
+    return [r for r in rows if r.get("lead_id") in done]
+
+
+def archive(backend: SheetBackend, grid: SheetGrid, days: int, tab: str,
+            trace: WorkflowTrace) -> int:
+    """Move finished rows to the archive tab. Rows that moved since the read are left alone."""
+    rows = archive_candidates(grid, days)
+    if not rows:
+        return 0
+    fresh = backend.read_rows(sorted({grid.header_row, *(r.number for r in rows)}))
+    header = fresh.get(grid.header_row) or []
+    if any(as_text(header[i] if i < len(header) else "").strip().casefold()
+           != COLUMNS[key].casefold() for key, i in grid.columns.items()):
+        return 0  # a column moved since the read; try tomorrow
+    lead_at = grid.columns["lead_id"]
+
+    def lead_now(raw: list[Any]) -> str:
+        return as_text(raw[lead_at]).strip() if lead_at < len(raw) else ""
+
+    still = [r for r in rows if lead_now(fresh.get(r.number) or []) == r.get("lead_id")]
+    if not still:
+        return 0
+    backend.archive_rows([r.number for r in still], grid.header_row, tab)
+    with transaction() as conn, conn.cursor() as cursor:
+        cursor.executemany(
+            "insert into sheet_row_state(lead_id,practice_id,profile_hash,row_number,archived_at) "
+            "select id,practice_id,%s,null,now() from leads where id=%s "
+            "on conflict(lead_id) do update set archived_at=now(),row_number=null,updated_at=now()",
+            [(profile_hash(r), r.get("lead_id")) for r in still],
+        )
+    trace.log("sheet_rows_archived", count=len(still))
+    return len(still)
+
+
+def archived(lead_ids: list[str]) -> set[str]:
+    if not lead_ids:
+        return set()
+    with transaction() as conn:
+        return {str(r["lead_id"]) for r in conn.execute(
+            "select lead_id from sheet_row_state where lead_id=any(%s) and archived_at is not null",
+            (lead_ids,),
+        )}
 
 
 # --- dry run --------------------------------------------------------------------------------

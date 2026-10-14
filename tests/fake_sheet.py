@@ -29,7 +29,9 @@ class FakeSheet:
             list(headers or HEADERS),
         ]
         self.writes: list[list[tuple[str, str]]] = []
-        self.reads = 0
+        self.reads = 0  # full-tab reads
+        self.row_reads = 0
+        self.archive: list[list[str]] | None = None  # the "Archive" tab once created
         self.before_write = None  # hook: lets a test move rows between the read and the write
 
     # --- test helpers ---
@@ -66,15 +68,28 @@ class FakeSheet:
         self.reads += 1
         return [list(row) for row in self.values]
 
-    def read_columns(self, letters: list[str]) -> dict[str, list[str]]:
+    def read_rows(self, numbers: list[int]) -> dict[int, list[str]]:
+        # The pre-write check reads rows: a test's "staff moved something" hook fires here.
         if self.before_write:
             hook, self.before_write = self.before_write, None
             hook()
+        self.row_reads += 1
+        return {n: list(self.values[n - 1]) if n <= len(self.values) else [] for n in numbers}
+
+    def read_columns(self, letters: list[str]) -> dict[str, list[str]]:
         out = {}
         for letter in letters:
             i = _index(letter)
             out[letter] = [row[i] if i < len(row) else "" for row in self.values]
         return out
+
+    def archive_rows(self, numbers: list[int], header_row: int, archive_tab: str) -> None:
+        if self.archive is None:
+            self.archive = [list(row) for row in self.values[:header_row]]
+        moved = [list(self.values[n - 1]) for n in sorted(numbers)]
+        self.archive[header_row:header_row] = moved
+        for n in sorted(numbers, reverse=True):
+            del self.values[n - 1]
 
     def write_cells(self, cells: list[tuple[str, str]]) -> None:
         self.writes.append(list(cells))

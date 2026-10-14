@@ -319,6 +319,24 @@ def sheet_check() -> None:
                      indent=2))
 
 
+def sheet_archive(args) -> None:
+    """Show (or with --apply, move) the rows the nightly archive would move now."""
+    from .services import sheet_direct
+    from .services.google_sheet import GoogleSheetBackend, parse_grid
+
+    settings = get_settings()
+    backend = GoogleSheetBackend(settings)
+    grid = parse_grid(backend.read_values(), settings.google_sheet_header_row)
+    days = args.days or settings.sheet_archive_days
+    rows = sheet_direct.archive_candidates(grid, days)
+    out: dict[str, object] = {"days": days, "rows": [r.number for r in rows]}
+    if args.apply:
+        out["archived"] = sheet_direct.archive(
+            backend, grid, days, settings.google_sheet_archive_tab,
+            WorkflowTrace("sheet_archive", "cli"))
+    print(json.dumps(out, indent=2))
+
+
 def main() -> None:
     configure_logging("cli")
     parser = argparse.ArgumentParser(prog="rpt")
@@ -337,6 +355,10 @@ def main() -> None:
     plan.add_argument("--full", action="store_true", help="recompute everyone")
     plan.add_argument("--dry-run", action="store_true", help="compute but write nothing")
     plan.add_argument("--limit", type=int, default=None)
+    archive = subparsers.add_parser("sheet-archive",
+                                    help="list (or --apply: move) finished Sheet rows to the archive")
+    archive.add_argument("--apply", action="store_true")
+    archive.add_argument("--days", type=int, default=None)
     test_lead = subparsers.add_parser("test-lead", help="create a consented synthetic lead")
     test_lead.add_argument("--phone", required=True)
     test_lead.add_argument("--first-name", default="Synthetic")
@@ -366,6 +388,7 @@ def main() -> None:
         "booking-sync": booking_sync,
         "booking-demo-seed": booking_demo_seed,
         "sheet-check": sheet_check,
+        "sheet-archive": lambda: sheet_archive(args),
         "agent": lambda: run_terminal(
             api_url=args.api_url,
             initial_leads=args.lead,

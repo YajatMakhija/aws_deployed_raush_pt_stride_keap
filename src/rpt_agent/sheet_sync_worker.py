@@ -18,7 +18,15 @@ from .observability import WorkflowTrace, configure_logging
 from .retry import retry_delay_seconds
 from .security import n8n_sheet_headers
 from .services import sheet_direct
-from .services.google_sheet import SheetBackend, SheetLayoutError, flush, parse_grid
+from .services.google_sheet import (
+    SheetBackend,
+    SheetGrid,
+    SheetLayoutError,
+    flush,
+    load_rows,
+    parse_grid,
+    scan,
+)
 from .services.sheet_sync import build_sheet_snapshot
 
 
@@ -254,18 +262,24 @@ def write_heartbeat(**details: Any) -> None:
 DIRECT_LOCK = "rpt:sheet-direct"
 
 
-def run_direct_tick(backend: SheetBackend) -> dict[str, int]:
-    """SHEET_SYNC_MODE=direct: one read of the Sheet, commands, profile edits, results.
+def run_direct_tick(backend: SheetBackend, *, full: bool | None = None) -> dict[str, int]:
+    """SHEET_SYNC_MODE=direct: commands, stuck rows, results; profile edits on full reads.
 
-    At most two writes per poll: the "Processing" claims (they must be in the Sheet before a
-    command runs, so a crash leaves a row recovery can retry), then everything else. Only one
-    process may poll at a time (advisory lock): two would each claim the same new row.
+    Most polls `scan` five narrow columns and load only the rows that need work, so the cost
+    stays flat as the Sheet grows. Every SHEET_FULL_READ_SECONDS the whole tab is read instead,
+    for profile edits and (in the archive hour) the nightly archive. At most two writes per
+    poll: the "Processing" claims (in the Sheet before a command runs, so a crash leaves a row
+    recovery can retry), then everything else. One poller at a time (advisory lock): two
+    would each claim the same new row.
     """
     settings = get_settings()
     counts: dict[str, int] = {"claimed": 0, "leads": 0, "delivered": 0, "retried": 0, "dead": 0,
                               "deferred": 0}
     if not settings.sheet_sync_enabled:
         return counts
+    if full is None:
+        full = time.monotonic() - _direct_state["last_full"] >= settings.sheet_full_read_seconds \
+            or not _direct_state["last_full"]
     with get_pool().connection() as lock:
         lock.autocommit = True
         if not lock.execute("select pg_try_advisory_lock(hashtext(%s)) as ok",
@@ -273,16 +287,45 @@ def run_direct_tick(backend: SheetBackend) -> dict[str, int]:
             counts["locked"] = 1
             return counts
         try:
-            return _direct_tick(backend, settings, counts)
+            result = _direct_tick(backend, settings, counts, full)
+            if full:
+                _direct_state["last_full"] = time.monotonic()
+            return result
         finally:
             lock.execute("select pg_advisory_unlock(hashtext(%s))", (DIRECT_LOCK,))
             lock.autocommit = False  # hand the pooled connection back as we found it
 
 
-def _direct_tick(backend: SheetBackend, settings: Settings, counts: dict[str, int]) -> dict[str, int]:
+# When the last full read ran (monotonic seconds; 0 = never) and the last archive day (Pacific).
+_direct_state: dict[str, Any] = {"last_full": 0.0, "archived_on": None}
+
+
+def _due_outbox_leads(settings: Settings) -> set[str]:
+    """Leads with Sheet results waiting (a peek, no claim): their rows are loaded on narrow polls."""
+    with transaction() as conn:
+        return {str(r["aggregate_id"]) for r in conn.execute(
+            "select aggregate_id from integration_outbox where destination='n8n' and status='pending' "
+            "and next_attempt_at<=now() order by id limit %s", (settings.sheet_sync_batch_size,),
+        )}
+
+
+def _direct_tick(backend: SheetBackend, settings: Settings, counts: dict[str, int],
+                 full: bool) -> dict[str, int]:
     trace = WorkflowTrace("sheet_direct_tick", "sheet-worker", uuid4().hex)
+    header_row = settings.google_sheet_header_row
+    first_row: dict[str, int] = {}  # lead id -> its first row (narrow polls)
     try:
-        grid = parse_grid(backend.read_values(), settings.google_sheet_header_row)
+        if full:
+            grid = parse_grid(backend.read_values(), header_row)
+        else:
+            columns, scanned = scan(backend, header_row)
+            grid = SheetGrid(columns, [], header_row)
+            for row in scanned:
+                if row.get("lead_id"):
+                    first_row.setdefault(row.get("lead_id"), row.number)
+            wanted = {row.number for row in scanned if sheet_direct.needs_attention(row)}
+            wanted |= {first_row[lead] for lead in _due_outbox_leads(settings) if lead in first_row}
+            load_rows(backend, grid, wanted)
     except SheetLayoutError as exc:
         trace.log("sheet_layout_invalid", logging.ERROR, reason=str(exc))
         write_heartbeat(mode="direct", ok=False, error=str(exc))
@@ -293,7 +336,8 @@ def _direct_tick(backend: SheetBackend, settings: Settings, counts: dict[str, in
     counts["deferred"] += len(claimed.deferred_rows)
     sheet_direct.run_claims(grid, claims, claimed.deferred_rows, poll, trace)
     sheet_direct.recover_stuck(grid, poll, settings.sheet_stuck_seconds, trace)
-    sheet_direct.sync_profiles(grid, poll, trace)
+    if full:
+        sheet_direct.sync_profiles(grid, poll, trace)
 
     rows = _claim_sheet_work(settings)
     counts["claimed"] = len(rows)
@@ -301,8 +345,16 @@ def _direct_tick(backend: SheetBackend, settings: Settings, counts: dict[str, in
     for row in rows:
         grouped[str(row["aggregate_id"])].append(row)
     counts["leads"] = len(grouped)
+    if not full:  # claimed leads the peek missed
+        load_rows(backend, grid, {first_row[lead] for lead in grouped if lead in first_row})
+    gone = sheet_direct.archived([lead for lead in grouped
+                                  if not any(r.get("lead_id") == lead for r in grid.rows)])
     placed: dict[str, int] = {}  # lead id -> Sheet row its snapshot was queued on
     for lead_id, lead_rows in grouped.items():
+        if lead_id in gone:
+            _mark_delivered(lead_rows)  # its row is in the archive tab: nothing to update
+            counts["delivered"] += len(lead_rows)
+            continue
         try:
             with transaction() as conn:
                 snapshot = build_sheet_snapshot(
@@ -343,9 +395,23 @@ def _direct_tick(backend: SheetBackend, settings: Settings, counts: dict[str, in
         _mark_delivered(grouped[lead_id])
         counts["delivered"] += len(grouped[lead_id])
     counts.update(poll.counts)
-    write_heartbeat(mode="direct", ok=True, rows=len(grid.rows), **counts)
-    trace.complete(**counts)
+    if full and _archive_due(settings):
+        counts["archived"] = sheet_direct.archive(
+            backend, grid, settings.sheet_archive_days, settings.google_sheet_archive_tab, trace)
+        _direct_state["archived_on"] = _pacific_now().date()
+    write_heartbeat(mode="direct", ok=True, full=full, rows=len(grid.rows), **counts)
+    trace.complete(full=full, **counts)
     return counts
+
+
+def _pacific_now() -> datetime:
+    return datetime.now(sheet_direct.SHEET_TZ)
+
+
+def _archive_due(settings: Settings) -> bool:
+    now = _pacific_now()
+    return (settings.sheet_archive_enabled and now.hour == settings.sheet_archive_hour
+            and _direct_state["archived_on"] != now.date())
 
 
 def _count(counts: dict[str, int], outcomes: dict[str, int]) -> None:

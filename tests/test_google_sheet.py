@@ -112,3 +112,24 @@ def test_another_row_moved_into_place_with_a_different_request_id_is_not_written
     grid.set(grid.rows[0], "outcome_status", "Cadence started")
     sheet.before_write = lambda: sheet.set(number, "action_request_id", "req-2")
     assert flush(sheet, grid).written == 0
+
+
+def test_neighbouring_rows_share_one_read_range():
+    from rpt_agent.services.google_sheet import _spans
+
+    assert _spans([3, 4, 5, 9, 11, 12]) == [(3, 5), (9, 9), (11, 12)]
+
+
+def test_a_scan_reads_only_the_narrow_columns_and_loads_just_the_rows_asked_for():
+    from rpt_agent.services.google_sheet import SheetGrid, load_rows, scan
+
+    sheet = FakeSheet()
+    first = sheet.add(name="Asha Rao", phone="5555550101", action="Start cadence")
+    sheet.add(name="Ravi Rao", phone="5555550102", lead_id="L2", outcome_status="Booked")
+    columns, rows = scan(sheet, header_row=2)
+    assert [r.number for r in rows] == [3, 4] and "name" not in rows[0].cells
+    assert rows[0].get("action") == "Start cadence" and rows[1].get("lead_id") == "L2"
+    grid = SheetGrid(columns, [], 2)
+    load_rows(sheet, grid, {first})
+    assert [r.number for r in grid.rows] == [first] and grid.rows[0].get("name") == "Asha Rao"
+    assert sheet.reads == 0
