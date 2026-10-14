@@ -190,6 +190,6 @@ def test_sheet_archive_days_zero_is_not_the_default(monkeypatch):
 
     monkeypatch.setattr("rpt_agent.services.google_sheet.GoogleSheetBackend", Backend)
     monkeypatch.setattr("rpt_agent.services.sheet_direct.archive_candidates",
-                        lambda grid, days: seen.setdefault("days", days) and [])
+                        lambda grid, days: seen.update(days=days) or [])
     cli.sheet_archive(SimpleNamespace(days=0, apply=False))
     assert seen["days"] == 0
