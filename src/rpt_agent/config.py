@@ -1,6 +1,7 @@
 from datetime import date
 from functools import cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,18 @@ class Settings(BaseSettings):
     sheet_sync_poll_seconds: int = Field(default=30, ge=1, le=3600)
     sheet_sync_batch_size: int = Field(default=20, ge=1, le=100)
     sheet_sync_http_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    # "n8n": the sheet-worker posts snapshots to n8n and n8n owns the Sheet (the old setup).
+    # "direct": the sheet-worker reads the Sheet itself (commands, profile edits) and writes
+    # results straight into it with a Google service account; the n8n Sheet workflows must be
+    # switched off, or both would act on the same row.
+    sheet_sync_mode: Literal["n8n", "direct"] = "n8n"
+    google_sheet_credentials_file: str = "/run/secrets/google-sheet-sa.json"
+    google_sheet_id: str = ""
+    google_sheet_tab: str = "Sheet1"
+    google_sheet_header_row: int = Field(default=2, ge=1, le=20)
+    # A row left "Processing"/"Retrying" this long (worker stopped mid-command) is retried
+    # with the same Action Request ID, which replays the stored result.
+    sheet_stuck_seconds: int = Field(default=120, ge=30, le=3600)
     # Stride CSV exports arrive over SFTP into the inbox; the stride-worker moves
     # each file to archive (imported) or error (unusable) once it is done.
     stride_import_enabled: bool = False
@@ -253,7 +266,7 @@ class Settings(BaseSettings):
                     errors.append("KEAP_HANDOFF_URL still contains the example hostname")
                 if self.keap_handoff_secret == "local-keap-secret":
                     errors.append("KEAP_HANDOFF_SECRET must be replaced outside local development")
-            if service == "sheet-worker" and self.sheet_sync_enabled:
+            if service == "sheet-worker" and self.sheet_sync_enabled and self.sheet_sync_mode == "n8n":
                 if not self.n8n_sheet_webhook_url.startswith("https://"):
                     errors.append("N8N_SHEET_WEBHOOK_URL must use HTTPS")
                 elif "example.com" in self.n8n_sheet_webhook_url:
@@ -267,10 +280,15 @@ class Settings(BaseSettings):
                 errors.append("DASHBOARD_PUBLIC_URL must use HTTPS")
             elif "example.com" in self.dashboard_public_url:
                 errors.append("DASHBOARD_PUBLIC_URL still contains the example hostname")
+        if service == "sheet-worker" and self.sheet_sync_enabled and self.sheet_sync_mode == "direct":
+            if not self.google_sheet_id:
+                errors.append("GOOGLE_SHEET_ID is required when SHEET_SYNC_MODE=direct")
+            if not Path(self.google_sheet_credentials_file).is_file():
+                errors.append("GOOGLE_SHEET_CREDENTIALS_FILE does not point to a readable key file")
         if service == "sheet-worker" and self.sheet_sync_enabled:
-            if not self.n8n_sheet_webhook_url:
+            if self.sheet_sync_mode == "n8n" and not self.n8n_sheet_webhook_url:
                 errors.append("N8N_SHEET_WEBHOOK_URL is required when Sheet sync is enabled")
-            if not self.n8n_sheet_webhook_secret:
+            if self.sheet_sync_mode == "n8n" and not self.n8n_sheet_webhook_secret:
                 errors.append("N8N_SHEET_WEBHOOK_SECRET is required when Sheet sync is enabled")
             if not self.n8n_practice_slug.strip():
                 errors.append("N8N_PRACTICE_SLUG is required when Sheet sync is enabled")

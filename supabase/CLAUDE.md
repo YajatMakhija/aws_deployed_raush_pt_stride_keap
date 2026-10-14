@@ -20,7 +20,7 @@ client).
 - `appointments` — Stride bookings. `suppressed_numbers` — per-phone do-not-contact list.
 - `provider_events`, `integration_events`, `integration_outbox` — durable webhook intake and outbound work
   (Sheet snapshots, Keap handoff, confirmation SMS).
-- `lead_action_requests` — idempotency for Sheet commands. `dashboard_audit_log`,
+- `lead_action_requests` — idempotency for Sheet commands. `sheet_row_state` — profile fingerprint per linked Sheet lead (direct Sheet sync). `dashboard_audit_log`,
   `dashboard_sms_requests` — staff actions.
 - `test_usage_ledger` — provider cost for test runs (kept on lead delete for billing).
 - `stride_import_files`, `stride_patients`, `stride_cases`, `stride_appointments`, `stride_users`,

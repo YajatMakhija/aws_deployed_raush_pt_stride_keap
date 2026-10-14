@@ -52,6 +52,9 @@ services:
     command: rpt-sheet-worker
     volumes:
       - ./logs:/app/logs
+      # Google service account key for SHEET_SYNC_MODE=direct. Kept outside the repo (never
+      # committed) and mounted read-only; unused in n8n mode.
+      - /home/ubuntu/stride-secrets/google-sheet-sa.json:/run/secrets/google-sheet-sa.json:ro
 
   # Keap contact sync (phase 2B). Separate so a slow or rate-limited Keap can never
   # delay calls/SMS, the Sheet or the Stride import. Idles while KEAP_SYNC_ENABLED=false.

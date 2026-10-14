@@ -16,10 +16,10 @@ Python 3.12 FastAPI service for the Rausch PT outreach cadence. Four processes, 
 | --- | --- | --- |
 | `api` | `uvicorn rpt_agent.api:app` | HTTP: Vapi tools/webhooks, Twilio webhooks, n8n Sheet actions, dashboard API, staff assistant |
 | `worker` | `rpt-worker` (`worker.py`) | Claims due outreach events, places Vapi calls / sends Twilio SMS, runs sweepers. Exactly one instance. |
-| `sheet-worker` | `rpt-sheet-worker` (`sheet_sync_worker.py`) | Pushes lead snapshots from `integration_outbox` to the n8n Sheet webhook |
+| `sheet-worker` | `rpt-sheet-worker` (`sheet_sync_worker.py`) | `SHEET_SYNC_MODE=n8n`: pushes lead snapshots to the n8n Sheet webhook. `direct`: reads the Google Sheet itself (commands, profile edits, stuck rows) and writes results into it (`services/sheet_direct.py`) |
 | `stride-worker` | `rpt-stride-worker` (`stride_import_worker.py`) | Imports Stride CSV exports from the SFTP inbox into `stride_*` tables; links patients to leads (booked / cancelled) |
 
-CLI: `rpt migrate | verify | seed | demo | test-lead | agent` (`cli.py`).
+CLI: `rpt migrate | verify | seed | demo | test-lead | agent | sheet-check` (`cli.py`; `sheet-check` is a read-only dry run of the next direct Sheet poll).
 
 ## Folder map
 

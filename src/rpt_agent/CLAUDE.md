@@ -10,7 +10,7 @@ Top-level modules. HTTP lives in `routes/`, business workflows in `services/`, t
 | `worker.py` | Cadence worker. `materialize_cadence()` builds a lead's schedule; `CLAIM_SQL` decides what is due (business hours, daily caps, opt-outs, suppression, TEST_MODE); `dispatch_job()` calls Vapi/Twilio; `run_tick()` runs claim → dispatch → sweepers; advisory lock keeps a single dispatcher. |
 | `stride_import_worker.py` | Stride SFTP importer: picks finished CSVs from the inbox (oldest first), one transaction per file via `services/stride_import.py`, moves files to archive/error, then `reconcile_leads`. |
 | `booking_worker.py` | `rpt-booking-worker` loop: expire slot holds, refresh the slot cache from Stride every `BOOKING_SYNC_SECONDS`, heartbeat. |
-| `sheet_sync_worker.py` | Claims `integration_outbox` Sheet events, signs and POSTs snapshots to the n8n webhook, retries with backoff. |
+| `sheet_sync_worker.py` | Claims `integration_outbox` Sheet events. n8n mode: signs and POSTs snapshots to the n8n webhook. Direct mode (`run_direct_tick`): one Sheet read per poll, commands/recovery/profile sync via `services/sheet_direct.py`, snapshots written into the lead's row, heartbeat in `service_heartbeats`. |
 | `security.py` | Auth for every inbound caller: dashboard token + identity headers (`DashboardActor`), n8n HMAC, Vapi secret/HMAC, Twilio signature; signed slot tokens and Keap handoff signing. |
 | `vapi_contract.py` | Parses Vapi tool-call payloads and end-of-call reports; maps Vapi ended reasons to call outcomes; builds tool responses. |
 | `providers.py` | `ProviderClients` facade bundling the Vapi/Twilio/Stride/Keap services. |

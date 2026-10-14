@@ -703,3 +703,37 @@ def test_a_contact_held_by_a_stride_only_patient_still_needs_review_and_keeps_it
     row = env.row(lead)
     assert row["status"] == "needs_review"
     assert row["last_error"] == "Keap contact already belongs to another person"
+
+
+def test_an_upcoming_booking_on_the_old_lead_keeps_the_person_booked_in_keap(env):
+    # Decision 2026-10-14: a repeat referral before the visit must not flip Keap back to Pending.
+    old = env.lead()
+    env.book(old, days=3)
+    env.sync(old)
+    cid = env.row(old)["keap_contact_id"]
+    assert env.keap.contacts[cid]["tag_ids"] == ["180"]
+    new = env.lead()
+    assert env.sync(new) == "synced"
+    assert env.row(new)["keap_contact_id"] == cid
+    assert env.keap.contacts[cid]["tag_ids"] == ["180"]  # still booked, no Pending
+    assert env.row(old)["status"] == "skipped"
+
+
+def test_a_past_visit_on_the_old_lead_leaves_the_new_referral_pending(env):
+    old = env.lead()
+    env.book(old, days=-3, status="Checked In")
+    env.sync(old)
+    new = env.lead()
+    env.sync(new)
+    assert PENDING in env.contact(new)["tag_ids"] and "180" not in env.contact(new)["tag_ids"]
+
+
+def test_a_family_member_on_the_same_phone_keeps_a_separate_contact(env):
+    parent = env.lead(name="Asha Rao", email="asha@example.test")
+    env.sync(parent)
+    child = env.lead(name="Ravi Rao", email="ravi@example.test")
+    env.sync(child)
+    env.db.execute("update leads set updated_at=now() where id=%s", (parent,))
+    env.plan()
+    assert env.row(parent)["status"] != "skipped"
+    assert env.row(child)["keap_contact_id"] != env.row(parent)["keap_contact_id"]

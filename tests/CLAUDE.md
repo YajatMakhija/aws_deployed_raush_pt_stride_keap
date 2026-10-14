@@ -22,6 +22,7 @@ Optional suites, skipped by default:
 | `test_worker.py` | Cadence materialization, claim rules, dispatch, sweepers |
 | `test_dashboard.py` | Dashboard API: roles, board stages, cadence versions, activity feed, lead create/delete |
 | `test_n8n_integration.py` | Sheet actions (start/restart/DNC/booked, cooldown), profile sync, Sheet snapshots |
+| `test_google_sheet.py`, `test_sheet_direct.py`, `test_sheet_direct_integration.py` | Direct Sheet sync with `fake_sheet.FakeSheet`: header mapping, moved-row safety, n8n rules and labels; end to end on a real schema (`TEST_DATABASE_URL`) |
 | `test_delivery.py`, `test_unspoken_call.py`, `test_last_decision.py` | Vapi end-of-call settlement and outcomes |
 | `test_review_pause.py`, `test_callback_timing.py` | Review/pause behaviour, callback scheduling |
 | `test_security.py` | Dashboard headers, HMAC, Vapi/Twilio auth |

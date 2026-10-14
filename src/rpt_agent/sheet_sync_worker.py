@@ -10,12 +10,15 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+from psycopg.types.json import Jsonb
 
 from .config import Settings, get_settings
-from .db import record_integration_event, transaction
+from .db import get_pool, record_integration_event, transaction
 from .observability import WorkflowTrace, configure_logging
 from .retry import retry_delay_seconds
 from .security import n8n_sheet_headers
+from .services import sheet_direct
+from .services.google_sheet import SheetBackend, SheetLayoutError, flush, parse_grid
 from .services.sheet_sync import build_sheet_snapshot
 
 
@@ -233,6 +236,123 @@ def run_sheet_sync_tick(client: httpx.Client | None = None) -> dict[str, int]:
     return counts
 
 
+def write_heartbeat(**details: Any) -> None:
+    """Best effort: a heartbeat failure must never stop the sync."""
+    try:
+        with transaction() as conn:
+            conn.execute(
+                "insert into service_heartbeats(service,last_seen_at,details) "
+                "values('sheet-worker',now(),%s) on conflict(service) do update "
+                "set last_seen_at=now(),details=excluded.details",
+                (Jsonb(details),),
+            )
+    except Exception:  # noqa: BLE001 - monitoring only
+        logging.getLogger(__name__).warning("sheet_heartbeat_failed",
+                                            extra={"event": "sheet_heartbeat_failed"})
+
+
+DIRECT_LOCK = "rpt:sheet-direct"
+
+
+def run_direct_tick(backend: SheetBackend) -> dict[str, int]:
+    """SHEET_SYNC_MODE=direct: one read of the Sheet, commands, profile edits, results.
+
+    At most two writes per poll: the "Processing" claims (they must be in the Sheet before a
+    command runs, so a crash leaves a row recovery can retry), then everything else. Only one
+    process may poll at a time (advisory lock): two would each claim the same new row.
+    """
+    settings = get_settings()
+    counts: dict[str, int] = {"claimed": 0, "leads": 0, "delivered": 0, "retried": 0, "dead": 0,
+                              "deferred": 0}
+    if not settings.sheet_sync_enabled:
+        return counts
+    with get_pool().connection() as lock:
+        lock.autocommit = True
+        if not lock.execute("select pg_try_advisory_lock(hashtext(%s)) as ok",
+                            (DIRECT_LOCK,)).fetchone()["ok"]:
+            counts["locked"] = 1
+            return counts
+        try:
+            return _direct_tick(backend, settings, counts)
+        finally:
+            lock.execute("select pg_advisory_unlock(hashtext(%s))", (DIRECT_LOCK,))
+            lock.autocommit = False  # hand the pooled connection back as we found it
+
+
+def _direct_tick(backend: SheetBackend, settings: Settings, counts: dict[str, int]) -> dict[str, int]:
+    trace = WorkflowTrace("sheet_direct_tick", "sheet-worker", uuid4().hex)
+    try:
+        grid = parse_grid(backend.read_values(), settings.google_sheet_header_row)
+    except SheetLayoutError as exc:
+        trace.log("sheet_layout_invalid", logging.ERROR, reason=str(exc))
+        write_heartbeat(mode="direct", ok=False, error=str(exc))
+        return counts
+    poll = sheet_direct.PollResult()
+    claims = sheet_direct.claim_commands(grid, trace)
+    claimed = flush(backend, grid)
+    counts["deferred"] += len(claimed.deferred_rows)
+    sheet_direct.run_claims(grid, claims, claimed.deferred_rows, poll, trace)
+    sheet_direct.recover_stuck(grid, poll, settings.sheet_stuck_seconds, trace)
+    sheet_direct.sync_profiles(grid, poll, trace)
+
+    rows = _claim_sheet_work(settings)
+    counts["claimed"] = len(rows)
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["aggregate_id"])].append(row)
+    counts["leads"] = len(grouped)
+    placed: dict[str, int] = {}  # lead id -> Sheet row its snapshot was queued on
+    for lead_id, lead_rows in grouped.items():
+        try:
+            with transaction() as conn:
+                snapshot = build_sheet_snapshot(
+                    conn, lead_id, practice_slug=settings.n8n_practice_slug,
+                    reasons=[str((r.get("payload") or {}).get("reason", "")) for r in lead_rows],
+                )
+            found = sheet_direct.apply_snapshot(grid, snapshot)
+        except LookupError as exc:
+            _count(counts, _mark_failed(lead_rows, SheetDeliveryError(str(exc), retryable=False),
+                                        settings))
+            continue
+        except Exception as exc:  # noqa: BLE001 - one lead must not strand the rest in 'sending'
+            _count(counts, _mark_failed(lead_rows, SheetDeliveryError(
+                f"unexpected Sheet sync error: {type(exc).__name__}", retryable=True), settings))
+            continue
+        if not found:
+            # Not in the Sheet yet (or the row was deleted): retried with backoff, then dead.
+            _count(counts, _mark_failed(lead_rows, SheetDeliveryError(
+                "Lead ID not found in the Sheet", retryable=True, http_status=404), settings))
+            continue
+        placed[lead_id] = next(r.number for r in grid.rows if r.get("lead_id") == lead_id)
+    try:
+        written = flush(backend, grid)
+    except Exception as exc:  # noqa: BLE001 - Google unavailable: every placed lead retries
+        trace.log("sheet_write_failed", logging.WARNING, error_category=type(exc).__name__)
+        for lead_id in placed:
+            _count(counts, _mark_failed(grouped[lead_id], SheetDeliveryError(
+                f"Google Sheets write failed: {type(exc).__name__}", retryable=True), settings))
+        write_heartbeat(mode="direct", ok=False, error=f"write failed: {type(exc).__name__}")
+        return counts
+    counts["deferred"] += len(written.deferred_rows)
+    poll.save_baselines(written.deferred_rows)
+    for lead_id, number in placed.items():
+        if number in written.deferred_rows:
+            _count(counts, _mark_failed(grouped[lead_id], SheetDeliveryError(
+                "Sheet row moved during the write; retrying", retryable=True), settings))
+            continue
+        _mark_delivered(grouped[lead_id])
+        counts["delivered"] += len(grouped[lead_id])
+    counts.update(poll.counts)
+    write_heartbeat(mode="direct", ok=True, rows=len(grid.rows), **counts)
+    trace.complete(**counts)
+    return counts
+
+
+def _count(counts: dict[str, int], outcomes: dict[str, int]) -> None:
+    counts["retried"] += outcomes["retried"]
+    counts["dead"] += outcomes["dead"]
+
+
 def main() -> None:
     configure_logging("sheet-worker")
     settings = get_settings()
@@ -241,12 +361,21 @@ def main() -> None:
         raise RuntimeError("; ".join(errors))
     logging.getLogger(__name__).info(
         "sheet_worker_started",
-        extra={"event": "sheet_worker_started", "details": {"enabled": settings.sheet_sync_enabled}},
+        extra={"event": "sheet_worker_started", "details": {
+            "enabled": settings.sheet_sync_enabled, "mode": settings.sheet_sync_mode}},
     )
+    backend: SheetBackend | None = None
     while True:
         started = time.monotonic()
         try:
-            run_sheet_sync_tick()
+            if settings.sheet_sync_mode == "direct":
+                if backend is None:
+                    from .services.google_sheet import GoogleSheetBackend
+
+                    backend = GoogleSheetBackend(settings)
+                run_direct_tick(backend)
+            else:
+                run_sheet_sync_tick()
         except Exception:
             logging.getLogger(__name__).exception(
                 "sheet_worker_tick_failed", extra={"event": "sheet_worker_tick_failed"}

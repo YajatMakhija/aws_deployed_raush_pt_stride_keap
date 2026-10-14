@@ -2045,3 +2045,27 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   newer lead takes it and the old row becomes `skipped` (`REPLACED_SKIP`). Anything else still needs review.
 - Planner: a lead with a newer lead on its number (and no Stride patient) is skipped, so it never competes
   again; a `needs_review` row keeps its `last_error`.
+
+### 2026-10-14 — Direct Google Sheet sync (replaces the n8n Sheet workflows)
+- `SHEET_SYNC_MODE=direct` makes the sheet-worker own the Sheet with a Google service account
+  (`GOOGLE_SHEET_CREDENTIALS_FILE`, mounted read-only from `/home/ubuntu/stride-secrets/` on the server;
+  `GOOGLE_SHEET_ID`, `GOOGLE_SHEET_TAB=Sheet1`, `GOOGLE_SHEET_HEADER_ROW=2`). Default stays `n8n`.
+  Turn the n8n intake, lead-sync and recovery workflows off before switching, or both act on one row.
+- One read of the tab per poll (30 s), at most two batched writes. Columns are found by header text.
+  Rows are addressed by number, so every write first re-reads the identity cells (Lead ID, Action Request
+  ID, Name, Phone) and skips a row that moved; it is retried next poll.
+- Same rules and labels as the n8n workflows (spec taken from the exports + the 2026-10-13 live ops):
+  the four commands, the "needs processing" filter on Outcome Status, intake phone (+91/+1) and DOB
+  (day first) rules, `Processing: X` → result, `Retrying n/3: X`, `Error: …`, recovery after
+  `SHEET_STUCK_SECONDS` with the same Action Request ID (replay, never a second lead).
+- Fixed versus n8n: results are written to the row found by Lead ID (n8n wrote by a possibly blank Action
+  Request ID); the `Action` cell from snapshots is written (n8n dropped it); dates are read unformatted
+  (serials) so the Sheet's locale cannot flip day/month; Case edits sync; "Request is still processing"
+  retries; readable 422 errors; a failed Start row re-runs by clearing Outcome Status, and if its earlier
+  request did create the lead the Lead ID is recovered instead of starting a second lead.
+- Profile edits: fingerprint per linked lead in `sheet_row_state` (migration 043); first sight stores a
+  baseline without acting. `rpt sheet-check` shows what the next poll would do (no writes).
+- Keap: "an upcoming booking wins" — an upcoming, non-cancelled appointment the same person (same phone +
+  first name) holds through an older lead counts for the newest lead, so a repeat referral before the
+  visit stays booked in Keap. "Superseded" now also requires the same first name (family members share
+  phones), and a superseded lead row is skipped even when a Stride patient is linked.

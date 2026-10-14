@@ -18,6 +18,8 @@ Routes and the worker call into these. Each workflow owns its SQL and runs insid
 | `stride_import.py` | Parses one Stride export file and applies it to `stride_*` tables: Upsert/Delete tombstones, newer-wins on Modified Date Time, appointment Deletes matched by case + start, PHI-free row issues. |
 | `stride_leads.py` | Links Stride patients to leads (name + DOB, or name + phone), marks a lead booked when Stride shows a future appointment, flags it for review when that booking is cancelled. Recomputed each tick. |
 | `appointment_views.py` | Read-only booking records for the dashboard (calendar, lead booking card, home Next appointments, booked board cards, assistant context): merges our `appointments` with `stride_appointments` (Stride wins once imported), normalises Stride statuses, tags each visit Elliot / Sheet lead / Stride only, and finds the call moment for Elliot bookings. |
+| `google_sheet.py` | Google Sheet access (gspread, service account): whole-tab read, columns by header text, queued cell writes that re-check each row's identity (Lead ID, Action Request ID, Name, Phone) just before writing. |
+| `sheet_direct.py` | Direct Sheet sync (replaces the n8n workflows): command rules and labels, claim → `execute_lead_action`, stuck-row recovery with the same request ID, profile sync by fingerprint (`sheet_row_state`), snapshot → row. |
 | `sheet_sync.py` | Builds the Sheet snapshot (`build_sheet_snapshot`) and enqueues it (`enqueue_sheet_update` → `integration_outbox`). Omits `action_status` unless booked / DNC / completed so n8n keeps the existing cell. |
 
 ## Provider clients

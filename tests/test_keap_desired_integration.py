@@ -492,3 +492,35 @@ def test_our_cancelled_booking_does_not_tag(env):
     _our_booking(env, lead, state="cancelled")
     env.plan()
     assert env.tags(lead_id=lead) == [PENDING]
+
+
+def test_an_upcoming_elliot_booking_on_the_old_lead_counts_for_the_new_one(env):
+    # Decision 2026-10-14: a repeat referral before the visit stays booked in Keap.
+    old = env.lead(status="booked")
+    _our_booking(env, old, stride_appointment_id=77010)
+    new = env.lead()
+    env.plan()
+    assert env.tags(lead_id=new) == ["180"]
+    assert env.row(lead_id=old)["status"] == "skipped"
+
+
+def test_a_carried_booking_that_stride_cancelled_no_longer_counts(env):
+    old = env.lead(status="booked")
+    _our_booking(env, old, stride_appointment_id=77011)
+    pid = env.patient(first="Asha", last="Rao", lead_id=old)
+    env.db.execute(
+        "insert into stride_appointments(practice_id,stride_id,patient_stride_id,appointment_type_id,"
+        "appointment_type,status,start_utc,clinician_id) values(%s,77011,%s,2,'x','Cancel',"
+        "now()+interval '3 days',7)", (env.practice_id, pid))
+    new = env.lead()
+    env.plan()
+    assert env.tags(lead_id=new) == [PENDING]
+
+
+def test_a_family_member_on_the_same_phone_does_not_carry_the_booking(env):
+    parent = env.lead(status="booked")
+    _our_booking(env, parent, stride_appointment_id=77012)
+    child = env.lead(name="Ravi Rao")
+    env.plan()
+    assert env.tags(lead_id=child) == [PENDING]
+    assert env.row(lead_id=parent)["status"] != "skipped"

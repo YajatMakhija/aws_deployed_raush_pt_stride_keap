@@ -36,6 +36,11 @@ KEEP_OUT_LEAD_STATUSES = {"do_not_contact", "invalid_phone"}
 # A repeat patient comes back as a new lead on the same number; the newest lead owns the
 # person's Keap contact (keap_sync.claim_contact hands it over).
 REPLACED_SKIP = "replaced by a newer referral: the newer lead owns the Keap contact"
+# Same person = same number (the join) and same first name: family members share phones.
+_SAME_FIRST_NAME = (
+    "lower(coalesce(nullif(n.first_name,''),split_part(n.full_name,' ',1)))="
+    "lower(coalesce(nullif(l.first_name,''),split_part(l.full_name,' ',1)))"
+)
 # More than this many people queued in one tick is a bulk first load: patient-only
 # rows are spread out so new leads never wait behind the backlog.
 BULK_THRESHOLD = 200
@@ -177,7 +182,7 @@ def compute_desired(
     if lead is not None and lead.get("status") in KEEP_OUT_LEAD_STATUSES:
         return Built(freeze=True) if synced_before else Built(
             skip_reason="do not contact / wrong number: kept out of Keap")
-    if lead is not None and lead.get("superseded") and patient is None:
+    if lead is not None and lead.get("superseded"):
         return Built(skip_reason=REPLACED_SKIP)
 
     # --- contact: Stride wins, except the phone (the lead's is the one we call) ---
@@ -429,8 +434,8 @@ def _load_context(conn, practice_id, rows, settings, mapping):
         for r in conn.execute(
             "select id,full_name,first_name,last_name,email,phone_e164,date_of_birth,status,"
             "is_test,exists(select 1 from leads n where n.practice_id=l.practice_id "
-            " and n.phone_e164=l.phone_e164 and n.id<>l.id and n.created_at>l.created_at) "
-            "as superseded from leads l where id=any(%s)",
+            " and n.phone_e164=l.phone_e164 and n.id<>l.id and n.created_at>l.created_at "
+            " and " + _SAME_FIRST_NAME + ") as superseded from leads l where id=any(%s)",
             (lead_ids,),
         )
     }
@@ -474,6 +479,48 @@ def _load_context(conn, practice_id, rows, settings, mapping):
             row.update(status=_OUR_STATE_AS_STRIDE[row.pop("state")], starts_at_local=None,
                        deleted_at=None, stride_id=row["stride_appointment_id"])
             appointments.setdefault(("lead", row["lead_id"]), []).append(row)
+    # An upcoming booking the same person still has through an OLDER lead (a repeat referral
+    # came in before the visit) counts for the newest lead, so Keap never flips a booked patient
+    # back to Pending (decision 2026-10-14: an upcoming booking wins). Keyed ("carried", lead id).
+    if lead_ids and type_ids:
+        carried_sql = (
+            "select n.id as for_lead,{cols} from leads n "
+            "join leads l on l.practice_id=n.practice_id and l.phone_e164=n.phone_e164 "
+            " and l.id<>n.id and l.created_at<n.created_at and " + _SAME_FIRST_NAME + " {join} "
+            "where n.practice_id=%s and n.id=any(%s) and {where}"
+        )
+        ours = carried_sql.format(
+            cols="a.stride_appointment_id as stride_id,ct.stride_appointment_type_id as "
+                 "appointment_type_id,a.start_utc,a.created_at as booked_at,a.clinician_id,"
+                 "c.display_name as clinician_name,'Unmarked' as status",
+            join="join appointments a on a.lead_id=l.id join case_types ct on ct.id=a.case_type_id "
+                 "left join clinicians c on c.practice_id=a.practice_id "
+                 "and c.stride_user_id=a.clinician_id",
+            # Once Stride has its own copy, that copy decides (cancelled, moved): ours is stale.
+            where="a.state in ('scheduled','unknown') and a.start_utc>now() "
+                  "and ct.stride_appointment_type_id=any(%s) and not exists(select 1 from "
+                  "stride_appointments sa where sa.practice_id=a.practice_id "
+                  "and sa.stride_id=a.stride_appointment_id)",
+        )
+        stride = carried_sql.format(
+            cols="sa.stride_id,sa.appointment_type_id,sa.start_utc,null::timestamptz as booked_at,"
+                 "sa.clinician_id,sa.clinician_name,sa.status",
+            join="join stride_patients sp on sp.practice_id=l.practice_id and sp.lead_id=l.id "
+                 "and sp.deleted_at is null join stride_appointments sa on "
+                 "sa.practice_id=sp.practice_id and sa.patient_stride_id=sp.stride_id",
+            where="sa.deleted_at is null and sa.start_utc>now() and sa.start_utc>=%s "
+                  "and sa.appointment_type_id=any(%s)",
+        )
+        for sql, params in (
+            (ours, (practice_id, lead_ids, type_ids)),
+            (stride, (practice_id, lead_ids, settings["keap_sync_start_at"], type_ids)),
+        ):
+            for r in conn.execute(sql, params):
+                row = dict(r)
+                if (row["status"] or "").strip().lower() in CANCELLED_STATUSES:
+                    continue
+                row.update(starts_at_local=None, deleted_at=None)
+                appointments.setdefault(("carried", row.pop("for_lead")), []).append(row)
     clinician_ids = {
         a["clinician_id"] for appts in appointments.values() for a in appts if a["clinician_id"]
     }
@@ -493,11 +540,14 @@ def _build_row(row, leads, patients, appointments, users, settings, mapping, now
     stride = appointments.get(patient_id, []) if patient_id else []
     seen = {a["stride_id"] for a in stride}
     ours = [a for a in appointments.get(("lead", row["lead_id"]), []) if a["stride_id"] not in seen]
+    seen |= {a["stride_id"] for a in ours}
+    carried = [a for a in appointments.get(("carried", row["lead_id"]), [])
+               if a["stride_id"] is None or a["stride_id"] not in seen]
     return compute_desired(
         lead=leads.get(row["lead_id"]) if row["lead_id"] else None,
         patient=patients.get(patient_id) if patient_id else None,
         patient_id=patient_id,
-        appointments=stride + ours,
+        appointments=stride + ours + carried,
         users=users,
         settings=settings,
         mapping=mapping,

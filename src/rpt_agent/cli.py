@@ -307,6 +307,18 @@ def keap_retry_failed() -> None:
     print(json.dumps({"reset": n}))
 
 
+def sheet_check() -> None:
+    """Read the Google Sheet and show what the next direct-mode poll would do. Changes nothing."""
+    from .services.google_sheet import GoogleSheetBackend, parse_grid
+    from .services.sheet_direct import preview
+
+    settings = get_settings()
+    backend = GoogleSheetBackend(settings)
+    grid = parse_grid(backend.read_values(), settings.google_sheet_header_row)
+    print(json.dumps({"tab": settings.google_sheet_tab, **preview(grid, settings.sheet_stuck_seconds)},
+                     indent=2))
+
+
 def main() -> None:
     configure_logging("cli")
     parser = argparse.ArgumentParser(prog="rpt")
@@ -315,7 +327,7 @@ def main() -> None:
         "migrate", "verify", "seed", "demo", "fixtures", "tick", "booking-sync", "booking-demo-seed",
     ):
         subparsers.add_parser(command)
-    for command in ("keap-discover", "keap-retry-failed"):
+    for command in ("keap-discover", "keap-retry-failed", "sheet-check"):
         subparsers.add_parser(command)
     once = subparsers.add_parser("keap-sync-once", help="plan and sync one person to Keap now")
     target = once.add_mutually_exclusive_group(required=True)
@@ -353,6 +365,7 @@ def main() -> None:
         "keap-retry-failed": keap_retry_failed,
         "booking-sync": booking_sync,
         "booking-demo-seed": booking_demo_seed,
+        "sheet-check": sheet_check,
         "agent": lambda: run_terminal(
             api_url=args.api_url,
             initial_leads=args.lead,
