@@ -17,6 +17,7 @@ Routes and the worker call into these. Each workflow owns its SQL and runs insid
 | `number_block.py` | Dashboard Do not contact switch: `block_number()` (same effect as the Sheet command) and `unblock_number()` (admin only; must choose `continue` or `restart`, clears opt-outs on the number, tells the Sheet). |
 | `stride_import.py` | Parses one Stride export file and applies it to `stride_*` tables: Upsert/Delete tombstones, newer-wins on Modified Date Time, appointment Deletes matched by case + start, PHI-free row issues. |
 | `stride_leads.py` | Links Stride patients to leads (name + DOB, or name + phone), marks a lead booked when Stride shows a future appointment, flags it for review when that booking is cancelled. Recomputed each tick. |
+| `appointment_views.py` | Read-only booking records for the dashboard (calendar, lead booking card, home Next appointments, booked board cards, assistant context): merges our `appointments` with `stride_appointments` (Stride wins once imported), normalises Stride statuses, tags each visit Elliot / Sheet lead / Stride only, and finds the call moment for Elliot bookings. |
 | `sheet_sync.py` | Builds the Sheet snapshot (`build_sheet_snapshot`) and enqueues it (`enqueue_sheet_update` → `integration_outbox`). Omits `action_status` unless booked / DNC / completed so n8n keeps the existing cell. |
 
 ## Provider clients

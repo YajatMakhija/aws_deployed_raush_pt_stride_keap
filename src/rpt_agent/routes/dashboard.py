@@ -14,6 +14,7 @@ from ..db import transaction
 from ..observability import WorkflowTrace
 from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
+from ..services import appointment_views
 from ..services.keap_sync_status import keap_sync_status
 from ..services.number_block import NumberBlockError, block_number, unblock_number
 from ..services.provider_http import ProviderError
@@ -550,11 +551,19 @@ def dashboard_snapshot(actor: Actor):
             "order by l.created_at desc limit 250"
         ).fetchall()
         leads = [_lead(row) for row in rows]
-        appointments = conn.execute(
-            "select a.id,a.lead_id,l.full_name,a.state,a.start_utc,a.end_utc,a.location_id,"
-            "a.appointment_type_id,a.needs_staff_review from appointments a join leads l on l.id=a.lead_id "
-            "where a.state in ('booking','scheduled','unknown') order by a.start_utc nulls last limit 100"
-        ).fetchall()
+        now = datetime.now(UTC)
+        # Booked cards on the board show when and how each lead was booked.
+        booked = appointment_views.lead_bookings(
+            conn, actor.practice_id, [lead["id"] for lead in leads if lead["stage"] == "booked"], now,
+        )
+        for lead in leads:
+            lead["booking"] = _board_booking(booked.get(str(lead["id"])))
+        # Next appointments: every visit still on the books from now on, ours and
+        # Stride's (front desk bookings and Stride-only patients included).
+        upcoming, _ = appointment_views.load_records(conn, actor.practice_id, lower=now, limit=200)
+        appointments = [
+            a for a in upcoming if appointment_views.status_bucket(a["state"]) == "booked"
+        ][:20]
         cadence = conn.execute(
             "select cs.id,cs.step_order,cs.day_offset,cs.channel,cs.key,cs.description,cs.is_active "
             "from cadence_steps cs join cadence_versions cv on cv.id=cs.cadence_version_id "
@@ -657,6 +666,12 @@ def dashboard_snapshot(actor: Actor):
         "system": system,
         "metrics": metrics,
     }
+
+
+def _board_booking(record):
+    if not record:
+        return None
+    return {key: record[key] for key in ("start_utc", "state", "tag", "type", "practitioner_name")}
 
 
 @router.get("/stride-sync")
@@ -852,6 +867,7 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
             "needs_staff_review from appointments where lead_id=%s order by booked_at desc",
             (lead_id,),
         ).fetchall()
+        booking = appointment_views.booking_card(conn, row["practice_id"], lead_id, datetime.now(UTC))
         status_history = conn.execute(
             "select from_status,to_status,reason,source,changed_at from lead_status_history "
             "where lead_id=%s order by changed_at desc limit 100",
@@ -924,6 +940,7 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
         "messages": messages,
         "calls": calls,
         "appointments": appointments,
+        "booking": booking,
         "history": status_history,
         "cadence_actions": cadence_actions,
         "activity": _build_activity(audits, events, status_history, appointments),

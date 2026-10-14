@@ -84,6 +84,8 @@ class Result:
 class SnapshotConnection:
     def execute(self, sql, params=None):
         del params
+        if "to_regclass" in sql:
+            return Result([{"imports": False, "booking": False}])
         if "from leads l left join lateral" in sql:
             return Result([{
                 "id": uuid4(), "full_name": "Synthetic Lead", "phone_e164": "+15550000001",
@@ -169,6 +171,8 @@ class DetailConnection:
         self.blocked_lookups = []
 
     def execute(self, sql, params=None):
+        if "to_regclass" in sql:
+            return Result([{"imports": False, "booking": False}])
         if "from suppressed_numbers" in sql:
             self.blocked_lookups.append(params)
             return Result([self.blocked] if self.blocked else [])

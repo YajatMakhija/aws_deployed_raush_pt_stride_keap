@@ -91,19 +91,19 @@ def test_production_assistant_requires_phi_approval_evidence():
         _env_file=None,
         app_env="production",
         assistant_enabled=True,
-        moonshot_api_key="configured",
+        openai_api_key="configured",
         supabase_db_url="postgresql://db.invalid/postgres?sslmode=require",
         dashboard_api_token="x" * 32,
         slot_token_secret="configured-slot-secret",
     )
     errors = settings.runtime_errors("api")
-    assert "KIMI_PHI_APPROVED must be true for the production assistant" in errors
-    assert "KIMI_PHI_APPROVAL_REFERENCE is required for real-patient assistant use" in errors
+    assert "ASSISTANT_PHI_APPROVED must be true for the production assistant" in errors
+    assert "ASSISTANT_PHI_APPROVAL_REFERENCE is required for real-patient assistant use" in errors
 
     approved = settings.model_copy(
-        update={"kimi_phi_approved": True, "kimi_phi_approval_reference": "security-review-123"}
+        update={"assistant_phi_approved": True, "assistant_phi_approval_reference": "security-review-123"}
     )
-    assert not any("KIMI_" in error or "MOONSHOT_" in error for error in approved.runtime_errors("api"))
+    assert not any("ASSISTANT_" in error or "OPENAI_" in error for error in approved.runtime_errors("api"))
     traced = approved.model_copy(update={"langsmith_tracing": True})
     assert "LangChain/LangSmith tracing must be disabled for the assistant" in (
         traced.runtime_errors("api")

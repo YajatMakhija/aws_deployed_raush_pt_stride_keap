@@ -14,6 +14,7 @@ belongs in `services/`. Every router is exported from `__init__.py` and register
 | `twilio.py` | `/api/v1/twilio` | Twilio | `POST /inbound-sms` (replies, STOP), `POST /message-status` (delivery callbacks); signature-checked |
 | `n8n.py` | `/api/v1/integrations/n8n` | n8n (Google Sheet) | `POST /lead-actions` (start / restart / DNC / booked), `POST /lead-sync` (profile fields); HMAC + `X-Request-ID` |
 | `dashboard.py` | `/api/v1/dashboard` | Next.js proxy | snapshot, lead CRUD, cadence pause/resume, contact rules, board stage moves, review resolve, outreach reschedule, cadence versions/steps, message templates, manual SMS |
+| `dashboard_calendar.py` | `/api/v1/dashboard` | Next.js proxy | `GET /appointment-calendar` (every booking, ours and Stride's, via `services/appointment_views.py`; also feeds the Analytics appointment counts), `GET /appointment-slots`, `POST /appointments` (staff booking) |
 | `tool_request.py` | — | helper | shared Vapi tool-request authentication |
 
 The staff assistant router (`/api/v1/dashboard/assistant`) lives in `../agent/router.py`.

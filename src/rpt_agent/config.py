@@ -26,10 +26,13 @@ class Settings(BaseSettings):
     assistant_requests_per_minute: int = Field(default=10, ge=1, le=60)
     langsmith_tracing: bool = False
     langchain_tracing_v2: bool = False
-    moonshot_api_key: str = ""
-    kimi_model: str = "kimi-k3"
-    kimi_phi_approved: bool = False
-    kimi_phi_approval_reference: str = ""
+    # Any OpenAI-compatible chat API; the base URL and model are settings so a provider
+    # change needs no code change.
+    openai_api_key: str = ""
+    assistant_base_url: str = "https://api.openai.com/v1"
+    assistant_model: str = "gpt-5.6-luna"
+    assistant_phi_approved: bool = False
+    assistant_phi_approval_reference: str = ""
     dashboard_public_url: str = ""
     n8n_intake_key_id: str = ""
     n8n_intake_secret: str = ""
@@ -197,17 +200,17 @@ class Settings(BaseSettings):
         if service == "api" and self.assistant_enabled:
             if self.langsmith_tracing or self.langchain_tracing_v2:
                 errors.append("LangChain/LangSmith tracing must be disabled for the assistant")
-            if not self.moonshot_api_key:
-                errors.append("MOONSHOT_API_KEY is required when the assistant is enabled")
-            if not self.kimi_model.strip():
-                errors.append("KIMI_MODEL is required when the assistant is enabled")
-            if deployment_env and not self.kimi_phi_approved:
-                errors.append("KIMI_PHI_APPROVED must be true for the production assistant")
-            if (deployment_env or self.kimi_phi_approved) and not (
-                self.kimi_phi_approval_reference.strip()
+            if not self.openai_api_key:
+                errors.append("OPENAI_API_KEY is required when the assistant is enabled")
+            if not self.assistant_model.strip():
+                errors.append("ASSISTANT_MODEL is required when the assistant is enabled")
+            if deployment_env and not self.assistant_phi_approved:
+                errors.append("ASSISTANT_PHI_APPROVED must be true for the production assistant")
+            if (deployment_env or self.assistant_phi_approved) and not (
+                self.assistant_phi_approval_reference.strip()
             ):
                 errors.append(
-                    "KIMI_PHI_APPROVAL_REFERENCE is required for real-patient assistant use"
+                    "ASSISTANT_PHI_APPROVAL_REFERENCE is required for real-patient assistant use"
                 )
         if deployment_env:
             if self.test_mode:

@@ -57,11 +57,21 @@ def day(offset):
     return (datetime.now(UTC).date() + timedelta(days=offset)).isoformat()
 
 
+def _local_database(url):
+    host = psycopg.conninfo.conninfo_to_dict(url).get("host") or "localhost"
+    return host in {"localhost", "127.0.0.1", "::1"} or host.startswith("/")
+
+
 @pytest.fixture(params=["fake"] + (["live"] if LIVE else []))
 def chain(request, monkeypatch, tmp_path):
     url = os.getenv("TEST_DATABASE_URL")
     if not url:
         pytest.skip("TEST_DATABASE_URL is not configured")
+    # These tests borrow the real rausch-pt practice and their clean-up wipes its Keap
+    # links, Stride import list and Stride rows. Run once against the shared demo DB, they
+    # erased the Mock Stride data the live demo server was using. Local databases only.
+    if not _local_database(url) and os.getenv("CHAIN_TESTS_ALLOW_SHARED_DB") != "1":
+        pytest.skip("chain tests run only on a local database (they reset the rausch-pt practice)")
     live = request.param == "live"
     run = uuid.uuid4().hex[:5]
     folders = {n: tmp_path / n for n in ("incoming", "archive", "error")}

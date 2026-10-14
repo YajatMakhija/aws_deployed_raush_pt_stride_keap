@@ -1990,3 +1990,32 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   `testing_updates/CLIENT_TEST_USAGE.md` to `docs/`; added `docs/README.md`; folder CLAUDE.md guides and
   the Keap phase docs are now in git; `.mcp.json` is ignored (it can hold tokens).
 
+### 2026-10-14 — Booking views on the dashboard; assistant on OpenAI
+
+- One read-only booking record (`services/appointment_views.py`) feeds the calendar, the lead page
+  booking card, the home "Next appointments" list, booked board cards and the assistant. It merges our
+  bookings with the Stride import (Stride wins once imported; a visit removed in Stride stays hidden) and
+  tags each visit: `elliot` (booking_source voice_agent), `sheet_lead` (one of our leads booked another
+  way), `stride_only` (no lead; calendar only, never the board).
+- Stride statuses are normalised: Unmarked / Confirmed / O / U → scheduled (Booked), Checked In / C →
+  completed; Cancel, Late Cancel and No Show as before. Our own bookings are typed "Initial Evaluation".
+- Lead detail returns `booking` (next visit still on the books, else the latest), with `quote`: the
+  patient's words just before Elliot confirmed (from the transcript; Vapi's stored report has no message
+  timings, so the call moment is the hold time minus the dial time).
+- Snapshot: `appointments` is now every upcoming visit (ours and Stride's, max 20) with tag, clinician,
+  location; booked leads carry `booking` {start_utc, state, tag, type, practitioner_name}.
+- Frontend: calendar Location / Status / Booked-by filters, a count summary, tags on every booking,
+  details with who booked, transcript link and Open lead; Analytics "Appointments" by month, location,
+  practitioner, case and tag (reads `/appointment-calendar`); home Next appointments table.
+- Migration 040: indexes on (practice_id, start_utc) for both appointment tables and on appointments.call_id.
+- Staff assistant now uses OpenAI: `OPENAI_API_KEY`, `ASSISTANT_BASE_URL` (default
+  https://api.openai.com/v1), `ASSISTANT_MODEL` (default gpt-5.6-luna, chosen over gpt-5.4-mini: faster
+  and correct on a booking question where mini named the clinician as the person to call),
+  `ASSISTANT_PHI_APPROVED` / `ASSISTANT_PHI_APPROVAL_REFERENCE` (replace the KIMI_* names). Real-patient
+  context stays blocked until an OpenAI BAA is recorded. Its context now includes the booking view.
+- Incident: `tests/test_keap_chain_integration.py` was run against the shared demo DB. Its clean-up
+  removed the demo practice's Keap link rows, Stride import list and Stride rows from Mock Stride
+  (stride_id >= 810000), and left three `keap_appointment_types` rows (type ids 1-3, label 't'). The test
+  now skips on any non-local database unless `CHAIN_TESTS_ALLOW_SHARED_DB=1`. Recovery: Mock Stride
+  `last_success_at` was cleared so its next export resends everything; the Keap worker re-linked contacts
+  by email (no duplicates). Run database tests only on a disposable local Postgres (tests/CLAUDE.md).

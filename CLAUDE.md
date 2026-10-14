@@ -28,7 +28,7 @@ CLI: `rpt migrate | verify | seed | demo | test-lead | agent` (`cli.py`).
 | `src/rpt_agent/` | Application package (config, db, worker, security, observability) | yes |
 | `src/rpt_agent/routes/` | FastAPI routers (thin HTTP layer) | yes |
 | `src/rpt_agent/services/` | Business workflows and provider clients | yes |
-| `src/rpt_agent/agent/` | Read-only staff assistant (LangChain + Kimi) | yes |
+| `src/rpt_agent/agent/` | Read-only staff assistant (LangChain + OpenAI) | yes |
 | `supabase/` | Ordered SQL migrations, seed, dev-only SQL | yes |
 | `tests/` | pytest suite (unit, contract, scenario; DB tests optional) | yes |
 | `config/` | Vapi tool schemas + outreach and booking assistant prompts; older n8n workflow exports | yes |

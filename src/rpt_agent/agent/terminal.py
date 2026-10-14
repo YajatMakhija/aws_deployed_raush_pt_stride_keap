@@ -66,7 +66,7 @@ def handle_command(
 def _safe_error(status_code: int) -> str:
     return {
         401: "Authentication failed. Check DASHBOARD_API_TOKEN.",
-        403: "Patient context is blocked until KIMI_PHI_APPROVED is enabled.",
+        403: "Patient context is blocked until ASSISTANT_PHI_APPROVED is enabled.",
         429: "The assistant request limit was reached; wait one minute and retry.",
         404: "One or more loaded leads no longer exist.",
         422: "The request was rejected. Check lead IDs and message limits.",

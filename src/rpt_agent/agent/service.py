@@ -14,9 +14,14 @@ from langchain_openai import ChatOpenAI
 from ..config import Settings, get_settings
 from ..db import transaction
 from ..observability import redact
+from ..services import appointment_views
 
-KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 MAX_LEADS = 3
+# Booking fields the model may see: no ids, phone or patient details beyond the lead's own name.
+_APPOINTMENT_FIELDS = (
+    "lead_id", "start_utc", "end_utc", "state", "type", "case_title", "practitioner_name",
+    "location", "tag", "booked_by", "booked_at", "needs_staff_review",
+)
 MAX_MESSAGE_CHARS = 4_000
 MAX_MESSAGES = 12
 MAX_CONVERSATION_CHARS = 20_000
@@ -24,22 +29,29 @@ MAX_CONTEXT_CHARS_PER_LEAD = 60_000
 
 FEATURE_GUIDE = """
 Dashboard feature guide:
-- Home: pipeline totals, today's work, and upcoming appointments.
+- Home: pipeline totals, today's work, and the next appointments (ours and Stride's, with tags).
 - Leads: board/list views, filters, lead intake, and the lead workspace.
-- Appointments: scheduled records and the entry point for live availability checks.
+- Appointments: calendar of every visit from Stride and our booking engine, with Location, Case,
+  Practitioner, Status and Booked-by filters, a count summary, and staff booking of open slots.
+  Tags: Elliot (booked by the voice agent on a call), Sheet lead (one of our leads booked another
+  way: front desk, text link or staff), Stride only (a Stride patient who never was our lead; never
+  on the board).
 - Review Queue: uncertain provider outcomes that staff must reconcile before retrying.
-- Analytics: pipeline, call, SMS delivery, booking, and review metrics.
+- Analytics: pipeline, call, SMS delivery, booking, and review metrics, plus appointment counts by
+  month, location, practitioner, case and tag.
 - Administration: links to cadence, templates, booking configuration, reconciliation, and reporting.
 - Global Cadence Studio: versioned outreach plans for future leads; active leads stay pinned to their run.
 - SMS Template Studio: reusable copy; published cadence messages remain locked until changed in a draft.
-- Lead workspace: Overview, Conversations, Cadence, Appointments, and History.
+- Lead workspace: Overview (with the booking card: date, clinician, who booked it, and for Elliot
+  bookings the call transcript), Conversations, Cadence, Appointments, and History.
 
 How outreach works:
 - A cadence is the scheduled sequence of calls and texts a new lead receives. The standard cadence
   runs 14 days with 8 steps: Day 0 call and text (introduction with the booking link), Day 1 text
   (booking reminder), Day 3 call, Day 5 call and text (encouragement with the booking link), Day 9
   text (reply CALL or use the booking link), Day 13 text (final reminder).
-- Calls are made by Sarah, the AI voice agent, only Monday to Friday 9am-5pm California time.
+- Calls are made by the AI voice agent (Elliot), only Monday to Friday 9am-5pm California time.
+  Elliot can book the Initial Evaluation in Stride during the call.
 - Outreach stops when the patient books, says they are not interested, asks not to be contacted,
   or turns out to be the wrong person. A booking link request, a transfer to staff, or a callback
   request is recorded on the lead; a callback moves the next call to the agreed time.
@@ -170,10 +182,10 @@ def load_lead_context(
         if len(scope) != len(lead_ids):
             raise LeadContextError("one or more selected leads were not found")
         if any(not row["is_test"] for row in scope) and not phi_approved:
-            raise PhiApprovalRequired("KIMI_PHI_APPROVED is required for real-patient context")
+            raise PhiApprovalRequired("ASSISTANT_PHI_APPROVED is required for real-patient context")
         leads = _query(
             conn,
-            "select l.id,l.full_name,l.status,l.status_reason,l.cadence_state,l.needs_review,"
+            "select l.id,l.practice_id,l.full_name,l.status,l.status_reason,l.cadence_state,l.needs_review,"
             "l.review_reason,l.is_test,l.phone_e164,l.phone_original,l.email,l.date_of_birth "
             "from leads l where l.id=any(%s::uuid[])",
             lead_ids,
@@ -188,14 +200,23 @@ def load_lead_context(
             "where oe.lead_id=any(%s::uuid[])) scoped where rn<=100 order by lead_id,rn",
             lead_ids,
         )
-        appointments = _query(
-            conn,
-            "select * from (select a.lead_id,a.state,a.start_utc,a.end_utc,a.booked_at,"
-            "a.needs_staff_review,row_number() over(partition by a.lead_id order by a.booked_at desc) rn "
-            "from appointments a where a.lead_id=any(%s::uuid[])) scoped "
-            "where rn<=20 order by lead_id,rn",
-            lead_ids,
-        )
+        # The same booking view staff see (ours and Stride's), newest 20 per lead.
+        appointments = []
+        for practice_id in {row["practice_id"] for row in leads}:
+            records, _ = appointment_views.load_records(
+                conn, practice_id, lead_ids=[str(r["id"]) for r in leads if r["practice_id"] == practice_id],
+            )
+            appointments += [
+                {key: record[key] for key in _APPOINTMENT_FIELDS} for record in records
+            ]
+        appointments.sort(key=lambda item: item["start_utc"], reverse=True)
+        kept: dict[str, int] = defaultdict(int)
+        newest = []
+        for item in appointments:
+            kept[str(item["lead_id"])] += 1
+            if kept[str(item["lead_id"])] <= 20:
+                newest.append(item)
+        appointments = newest
         history = _query(
             conn,
             "select * from (select h.lead_id,h.from_status,h.to_status,h.reason,h.source,h.changed_at,"
@@ -381,9 +402,9 @@ def _agent_request(
     current_path: str,
 ):
     model = ChatOpenAI(
-        model=settings.kimi_model,
-        base_url=KIMI_BASE_URL,
-        api_key=settings.moonshot_api_key,
+        model=settings.assistant_model,
+        base_url=settings.assistant_base_url,
+        api_key=settings.openai_api_key,
         reasoning_effort="low",
         timeout=min(60.0, max(10.0, settings.request_timeout_seconds)),
         max_retries=1,
@@ -431,7 +452,7 @@ async def _invoke_agent(
     result = await agent.ainvoke(payload)
     answer = _message_text(result["messages"][-1])
     if not answer:
-        raise RuntimeError("Kimi returned an empty response")
+        raise RuntimeError("the assistant model returned an empty response")
     safe_answer, _, _ = _fit_text(_safe_free_text(answer), MAX_MESSAGE_CHARS)
     return safe_answer
 
@@ -446,13 +467,13 @@ def _prepare_question(
         raise AgentConfigurationError("the assistant is disabled")
     if settings.langsmith_tracing or settings.langchain_tracing_v2:
         raise AgentConfigurationError("LangChain/LangSmith tracing must be disabled")
-    if not settings.moonshot_api_key:
-        raise AgentConfigurationError("MOONSHOT_API_KEY is not configured")
-    if not settings.kimi_model.strip():
-        raise AgentConfigurationError("KIMI_MODEL is not configured")
-    if settings.kimi_phi_approved and not settings.kimi_phi_approval_reference.strip():
+    if not settings.openai_api_key:
+        raise AgentConfigurationError("OPENAI_API_KEY is not configured")
+    if not settings.assistant_model.strip():
+        raise AgentConfigurationError("ASSISTANT_MODEL is not configured")
+    if settings.assistant_phi_approved and not settings.assistant_phi_approval_reference.strip():
         raise AgentConfigurationError(
-            "KIMI_PHI_APPROVAL_REFERENCE is required for real-patient assistant use"
+            "ASSISTANT_PHI_APPROVAL_REFERENCE is required for real-patient assistant use"
         )
     latest_question = messages[-1]["content"]
     identifier_contexts = [
@@ -474,7 +495,7 @@ def _prepare_question(
     contexts = (
         []
         if feature_question or not lead_ids
-        else load_lead_context(lead_ids, phi_approved=settings.kimi_phi_approved)
+        else load_lead_context(lead_ids, phi_approved=settings.assistant_phi_approved)
     )
     clarification = ambiguity_clarification(latest_question, contexts)
     if clarification:
@@ -515,7 +536,7 @@ async def _stream_agent(
             emitted = True
             yield safe
     if not emitted:
-        raise RuntimeError("Kimi returned an empty response")
+        raise RuntimeError("the assistant model returned an empty response")
 
 
 def stream_answer(

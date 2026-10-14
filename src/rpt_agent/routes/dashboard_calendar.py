@@ -9,8 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..db import transaction
 from ..observability import WorkflowTrace
-from ..services import slot_booking
-from ..services.stride_import import CANCELLED_STATUSES, LATE_CANCEL_STATUSES, NO_SHOW_STATUSES
+from ..services import appointment_views, slot_booking
 from .dashboard import Actor, _audit
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
@@ -28,33 +27,7 @@ def calendar_window(start: date, end: date, timezone: str):
 
 
 def calendar_record(row, *, imported=False):
-    start, end = row["start_utc"], row.get("end_utc")
-    duration = (end - start).total_seconds() / 60 if start and end else None
-    state = str(row.get("state") or "scheduled").strip().lower()
-    if imported:
-        state = ("late_cancel" if state in LATE_CANCEL_STATUSES else
-                 "cancelled" if state in CANCELLED_STATUSES else
-                 "no_show" if state in NO_SHOW_STATUSES else
-                 "scheduled" if state in {"o", "open"} else state)
-    provider_key = row["id"] if imported else row.get("stride_appointment_id")
-    return {
-        "id": f"stride:{provider_key}" if provider_key is not None else f"booking:{row['id']}",
-        "lead_id": row.get("lead_id"),
-        "full_name": row.get("full_name") or "Patient name unavailable",
-        "start_utc": start,
-        "end_utc": end,
-        "duration_minutes": duration if duration and duration > 0 else None,
-        "practitioner_id": str(row.get("clinician_id") or "unassigned"),
-        "practitioner_name": row.get("clinician_name") or "Unassigned practitioner",
-        "location": row.get("location") or "Location unavailable",
-        "case_title": row.get("case_title") or "Case unavailable",
-        "type": row.get("type") or "Appointment",
-        "state": state,
-        "needs_staff_review": bool(row.get("needs_staff_review")),
-        "source": "Stride" if imported else "Booking service",
-        "lead_source": row.get("lead_source"),
-        "stride_appointment_id": row.get("stride_appointment_id"),
-    }
+    return appointment_views.record(row, imported=imported)
 
 
 @router.get("/appointment-calendar")
@@ -70,41 +43,10 @@ def appointment_calendar(actor: Actor, start: date, end: date, lead_id: UUID | N
             "select to_regclass('public.stride_appointments') is not null as imports,"
             "to_regclass('public.clinician_assignments') is not null as booking"
         ).fetchone()
-        mirror_filter = (
-            "and not exists(select 1 from stride_appointments sa where sa.practice_id=a.practice_id "
-            "and sa.stride_id=a.stride_appointment_id) " if tables["imports"] else ""
+        records, truncated = appointment_views.load_records(
+            conn, actor.practice_id, lower=lower, upper=upper,
+            lead_ids=[lead_id] if lead_id else None, limit=MAX_RECORDS,
         )
-        native = conn.execute(
-            "select a.id,a.lead_id,l.full_name,a.start_utc,a.end_utc,a.clinician_id,"
-            "a.location_id,l.location,l.lead_type as case_title,l.source_system as lead_source,"
-            "a.state,a.needs_staff_review,a.stride_appointment_id "
-            "from appointments a join leads l on l.id=a.lead_id "
-            "where a.practice_id=%s and a.start_utc>=%s and a.start_utc<%s "
-            "and (%s::uuid is null or a.lead_id=%s) and a.state<>'failed' "
-            + mirror_filter + "order by a.start_utc,a.id limit %s",
-            (actor.practice_id, lower, upper, lead_id, lead_id, MAX_RECORDS + 1),
-        ).fetchall()
-        imported = []
-        if tables["imports"]:
-            imported = conn.execute(
-                "select sa.stride_id as id,sp.lead_id,"
-                "coalesce(l.full_name,nullif(trim(concat_ws(' ',sp.first_name,sp.last_name)),'')) "
-                "as full_name,sa.start_utc,sa.end_utc,sa.clinician_id,sa.clinician_name,"
-                "sa.location_id,sa.location_name as location,coalesce(sc.title,l.lead_type) as case_title,"
-                "sa.appointment_type as type,"
-                "sa.status as state,l.source_system as lead_source,sa.stride_id as stride_appointment_id "
-                "from stride_appointments sa "
-                "left join stride_patients sp on sp.practice_id=sa.practice_id "
-                "and sp.stride_id=sa.patient_stride_id and sp.deleted_at is null "
-                "left join stride_cases sc on sc.practice_id=sa.practice_id "
-                "and sc.stride_id=sa.case_stride_id and sc.deleted_at is null "
-                "left join leads l on l.id=sp.lead_id and l.practice_id=sa.practice_id "
-                "where sa.practice_id=%s and sa.deleted_at is null "
-                "and sa.start_utc>=%s and sa.start_utc<%s "
-                "and (%s::uuid is null or l.id=%s) "
-                "order by sa.start_utc,sa.stride_id limit %s",
-                (actor.practice_id, lower, upper, lead_id, lead_id, MAX_RECORDS + 1),
-            ).fetchall()
         practitioners = []
         if tables["booking"]:
             practitioners = conn.execute(
@@ -116,20 +58,6 @@ def appointment_calendar(actor: Actor, start: date, end: date, lead_id: UUID | N
                 "and c.is_active and ca.is_active and bl.is_active order by c.display_name,bl.name",
                 (actor.practice_id, actor.practice_id),
             ).fetchall()
-        names = {str(p["id"]): p["name"] for p in practitioners}
-        location_names = {p["stride_location_id"]: p["location"] for p in practitioners}
-        for row in native + imported:
-            row["location"] = location_names.get(row.get("location_id")) or row.get("location")
-        for row in native:
-            row["clinician_name"] = names.get(str(row["clinician_id"]))
-        # The import is authoritative once it has seen a booking, including cancellations.
-        imported_ids = {r["stride_appointment_id"] for r in imported}
-        records = [calendar_record(r, imported=True) for r in imported]
-        records += [calendar_record(r) for r in native
-                    if r["stride_appointment_id"] not in imported_ids]
-        records.sort(key=lambda r: (r["start_utc"], r["id"]))
-        truncated = len(records) > MAX_RECORDS
-        records = records[:MAX_RECORDS]
         resources = {(str(p["id"]), p["location"]): {
             "id": str(p["id"]), "name": p["name"], "location": p["location"],
         } for p in practitioners}

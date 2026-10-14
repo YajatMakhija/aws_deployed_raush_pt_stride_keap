@@ -40,6 +40,7 @@ class AgentConnection:
         if "from leads l" in sql:
             return Result([{
                 "id": self.lead_id,
+                "practice_id": 1,
                 "full_name": "Synthetic Lead",
                 "status": "in_progress",
                 "status_reason": "Call +15555550123 or synthetic@example.test",
@@ -70,7 +71,19 @@ class AgentConnection:
                 "cadence_version_name": "Standard v10",
                 "rn": 1,
             }])
-        if "from appointments a" in sql:
+        if "to_regclass" in sql:
+            return Result([{"imports": True, "booking": False}])
+        if "from appointments a join leads" in sql:
+            # An Elliot booking: the model may see when, what and who booked, never ids.
+            return Result([{
+                "id": 31, "lead_id": self.lead_id, "full_name": "Synthetic Lead",
+                "start_utc": now, "end_utc": now, "clinician_id": 5980, "location_id": 3169,
+                "location": "Dana Point", "case_title": "Physical Therapy", "lead_source": "synthetic_test",
+                "state": "scheduled", "needs_staff_review": False, "stride_appointment_id": 4242,
+                "booked_at": now, "booking_source": "voice_agent", "hold_at": now,
+                "call_log_id": 77, "call_offset_seconds": 84,
+            }])
+        if "from stride_appointments sa" in sql:
             return Result([])
         if "from lead_status_history h" in sql:
             return Result([])
@@ -133,8 +146,17 @@ def test_context_queries_only_selected_leads_and_redacts_free_text(monkeypatch):
     assert "synthetic@example.test" not in rendered
     assert "1990-01-01" not in rendered
     assert "recording" not in rendered.lower()
-    assert all("any(%s::uuid[])" in sql for sql, _ in connection.calls)
-    assert all(params == ([str(lead_id)],) for _, params in connection.calls)
+    booking_view = [(sql, p) for sql, p in connection.calls
+                    if "to_regclass" in sql or "from appointments a join" in sql
+                    or "from stride_appointments sa" in sql]
+    others = [call for call in connection.calls if call not in booking_view]
+    assert all("any(%s::uuid[])" in sql for sql, _ in others)
+    assert all(params == ([str(lead_id)],) for _, params in others)
+    # The shared booking view is scoped by the lead's practice and the selected lead only.
+    for sql, params in booking_view:
+        if "to_regclass" not in sql:
+            assert "any(%s::uuid[])" in sql and params[0] == 1 and params[5] == [str(lead_id)]
+    assert context[0]["appointments"][0]["tag"] == "elliot"
 
 
 def test_phi_gate_runs_before_patient_context_queries(monkeypatch):
@@ -361,8 +383,8 @@ def test_agent_audit_rate_limit_is_database_backed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_missing_kimi_key_fails_before_database(monkeypatch):
-    settings = get_settings().model_copy(update={"moonshot_api_key": ""})
+async def test_missing_openai_key_fails_before_database(monkeypatch):
+    settings = get_settings().model_copy(update={"openai_api_key": ""})
     monkeypatch.setattr(agent_service, "get_settings", lambda: settings)
     with pytest.raises(agent_service.AgentConfigurationError):
         await agent_service.answer_question(
@@ -372,9 +394,9 @@ async def test_missing_kimi_key_fails_before_database(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_phi_approval_requires_a_reference_before_database(monkeypatch):
-    monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
-    monkeypatch.setenv("KIMI_PHI_APPROVED", "true")
-    monkeypatch.delenv("KIMI_PHI_APPROVAL_REFERENCE", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ASSISTANT_PHI_APPROVED", "true")
+    monkeypatch.delenv("ASSISTANT_PHI_APPROVAL_REFERENCE", raising=False)
     monkeypatch.setattr(
         agent_service,
         "load_lead_context",
@@ -393,7 +415,7 @@ async def test_phi_approval_requires_a_reference_before_database(monkeypatch):
 @pytest.mark.asyncio
 async def test_no_leads_asks_the_model_without_patient_context(monkeypatch):
     """"What is a cadence?" must reach the model; the keyword gate used to refuse it."""
-    monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     seen = {}
 
     def fake_create_agent(**kwargs):
@@ -421,7 +443,7 @@ async def test_no_leads_asks_the_model_without_patient_context(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dashboard_feature_question_does_not_load_patient_context(monkeypatch):
-    monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(
         agent_service,
         "load_lead_context",
@@ -447,8 +469,8 @@ async def test_dashboard_feature_question_does_not_load_patient_context(monkeypa
 
 @pytest.mark.asyncio
 async def test_real_lead_requires_phi_approval(monkeypatch):
-    monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
-    monkeypatch.setenv("KIMI_PHI_APPROVED", "false")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ASSISTANT_PHI_APPROVED", "false")
     get_settings.cache_clear()
 
     def fake_load(_, *, phi_approved):
@@ -470,7 +492,7 @@ async def test_real_lead_requires_phi_approval(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_kimi_payload_is_scoped_redacted_and_mocked(monkeypatch):
+async def test_model_payload_is_scoped_redacted_and_mocked(monkeypatch):
     lead_id = uuid4()
     connection = AgentConnection(lead_id)
     captured = {}
@@ -495,7 +517,7 @@ async def test_kimi_payload_is_scoped_redacted_and_mocked(monkeypatch):
     monkeypatch.setattr(agent_service, "transaction", fake_transaction)
     monkeypatch.setattr(agent_service, "ChatOpenAI", FakeChatOpenAI)
     monkeypatch.setattr(agent_service, "create_agent", fake_create_agent)
-    monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("REQUEST_TIMEOUT_SECONDS", "999")
     get_settings.cache_clear()
     try:
@@ -522,7 +544,10 @@ async def test_kimi_payload_is_scoped_redacted_and_mocked(monkeypatch):
         "provider_ref",
     ):
         assert forbidden not in payload
-    assert captured["config"]["model"] == "kimi-k3"
+    # The booking reaches the model as plain facts; Stride and call ids do not.
+    assert "Initial Evaluation" in payload and "elliot" in payload and "voice_agent" in payload
+    assert "4242" not in payload and "call_log_id" not in payload
+    assert captured["config"]["model"] == "gpt-5.6-luna"
     assert captured["config"]["reasoning_effort"] == "low"
     assert captured["config"]["max_retries"] == 1
     assert captured["config"]["timeout"] == 60
@@ -531,7 +556,7 @@ async def test_kimi_payload_is_scoped_redacted_and_mocked(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_kimi_streams_multiple_redacted_chunks(monkeypatch):
+async def test_model_streams_multiple_redacted_chunks(monkeypatch):
     class FakeChatOpenAI:
         def __init__(self, **_kwargs):
             pass
@@ -545,7 +570,7 @@ async def test_kimi_streams_multiple_redacted_chunks(monkeypatch):
 
     monkeypatch.setattr(agent_service, "ChatOpenAI", FakeChatOpenAI)
     monkeypatch.setattr(agent_service, "create_agent", lambda **_kwargs: FakeAgent())
-    settings = get_settings().model_copy(update={"moonshot_api_key": "test-key"})
+    settings = get_settings().model_copy(update={"openai_api_key": "test-key"})
     chunks = [
         chunk
         async for chunk in agent_service._stream_agent(

@@ -117,10 +117,10 @@ IDs. This login needs no Supabase Auth token; `SUPABASE_DB_URL` continues to pro
 ## Production staff assistant
 
 The staff assistant is disabled by default. It has no write/provider tools and sends only explicitly selected,
-redacted lead context to Kimi. Every authenticated request is durably audited in `dashboard_audit_log`; a
+redacted lead context to the configured model (OpenAI by default). Every authenticated request is durably audited in `dashboard_audit_log`; a
 Postgres advisory lock enforces the configured per-actor one-minute request limit across API processes.
 
-Before enabling it for real patients, obtain documented approval for Moonshot to process the intended patient
+Before enabling it for real patients, obtain documented approval (an OpenAI BAA) for the model provider to process the intended patient
 data and record the non-secret agreement/security-review reference. Then configure:
 
 ```dotenv
@@ -129,10 +129,10 @@ ASSISTANT_ENABLED=true
 ASSISTANT_REQUESTS_PER_MINUTE=10
 LANGSMITH_TRACING=false
 LANGCHAIN_TRACING_V2=false
-MOONSHOT_API_KEY=<from the production secret store>
-KIMI_MODEL=kimi-k3
-KIMI_PHI_APPROVED=true
-KIMI_PHI_APPROVAL_REFERENCE=<contract-or-security-review-reference>
+OPENAI_API_KEY=<from the production secret store>
+ASSISTANT_MODEL=gpt-5.6-luna
+ASSISTANT_PHI_APPROVED=true
+ASSISTANT_PHI_APPROVAL_REFERENCE=<contract-or-security-review-reference>
 ```
 
 Do not set the last two values merely to bypass readiness. Until approval exists, leave the assistant disabled;
@@ -153,7 +153,7 @@ docker compose -f docker-compose.prod.yml exec api `
 ```
 
 The terminal uses `POST /api/v1/dashboard/assistant/stream` and prints redacted Server-Sent Event chunks as
-LangChain receives them from Kimi. The original `POST /api/v1/dashboard/assistant` JSON response remains
+LangChain receives them from the model. The original `POST /api/v1/dashboard/assistant` JSON response remains
 available for non-streaming clients.
 
 For deterministic tests only, start the mock provider explicitly:
