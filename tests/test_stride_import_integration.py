@@ -1002,6 +1002,32 @@ def test_same_person_added_twice_links_the_newest_lead(env):
     assert env.one("select stride_patient_id from leads where id=%s", older)["stride_patient_id"] is None
 
 
+def test_twin_already_linked_elsewhere_is_not_replaced_by_the_other_twin(env):
+    # Demo, 2026-10-14: twin A (same name + birthday as B, other phone) was booked by staff, which
+    # linked A to the Stride patient our booking created. A second Stride record for A (a duplicate
+    # patient, A's phone) then matched only B, because linked leads were left out, and B was linked
+    # to A's visits. Name + birthday fits two people with different phones: staff decide.
+    twin_a = env.lead("Twin Sister", phone="+15552010000")
+    env.db.execute("update leads set stride_patient_id=140136 where id=%s", (twin_a,))
+    twin_b = env.lead("Twin Sister", phone="+15552019999")
+    counts = _import_patient_with_appointment(env, first="Twin", last="Sister")
+    assert counts["leads_linked"] == 0 and counts["leads_ambiguous"] == 1
+    assert env.one("select stride_patient_id from leads where id=%s", twin_b)["stride_patient_id"] is None
+    assert env.one("select status from leads where id=%s", twin_b)["status"] == "in_progress"
+
+
+def test_repeat_referral_still_links_when_the_older_lead_is_linked(env):
+    # Same person (same phone) whose older lead already has a Stride patient: a second patient
+    # record still belongs to that person, so the newest free lead is linked.
+    older = env.lead("Twice Linked")
+    env.db.execute("update leads set stride_patient_id=140137,cadence_state='terminated',"
+                   "created_at=now()-interval '1 hour' where id=%s", (older,))
+    newer = env.lead("Twice Linked")
+    counts = _import_patient_with_appointment(env, first="Twice", last="Linked")
+    assert counts["leads_linked"] == 1 and counts["leads_ambiguous"] == 0
+    assert env.one("select status from leads where id=%s", newer)["status"] == "booked"
+
+
 
 # --- the booking engine never books someone who is already booked ---------------
 

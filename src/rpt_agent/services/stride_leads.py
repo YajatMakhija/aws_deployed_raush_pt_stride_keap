@@ -45,23 +45,25 @@ with p as (
   from stride_patients p
   where p.practice_id=%(practice)s and p.lead_id is null and p.deleted_at is null
 ), l as (
-  select l.id, l.phone_e164, l.created_at, l.date_of_birth,
+  select l.id, l.phone_e164, l.created_at, l.date_of_birth, l.stride_patient_id,
     lower(regexp_replace(trim(l.full_name),'\\s+',' ','g')) as full_key,
     case when nullif(trim(coalesce(l.last_name,'')),'') is null and position(' ' in trim(l.full_name)) = 0
       then lower(trim(coalesce(nullif(trim(l.first_name),''), split_part(trim(l.full_name),' ',1))))
     end as first_key
   from leads l
-  where l.practice_id=%(practice)s and l.stride_patient_id is null
+  -- Leads already linked to a patient stay in: they still count as rival matches.
+  where l.practice_id=%(practice)s
 ), named as (
   -- Two equality joins (hash joins) instead of one OR join: comparing every patient with
   -- every lead took minutes on a full Stride history (50k patients x 3k leads, 2026-10-14).
-  select p.*, l.id as lead_id, l.phone_e164, l.created_at, l.date_of_birth as lead_dob
+  select p.*, l.id as lead_id, l.phone_e164, l.created_at, l.date_of_birth as lead_dob,
+    l.stride_patient_id as lead_patient
   from p join l on l.full_key = p.full_key
   union
-  select p.*, l.id, l.phone_e164, l.created_at, l.date_of_birth
+  select p.*, l.id, l.phone_e164, l.created_at, l.date_of_birth, l.stride_patient_id
   from p join l on l.first_key is not null and l.first_key = p.first_key
 )
-select stride_id, lead_id, phone_e164, created_at from named
+select stride_id, lead_id, phone_e164, created_at, lead_patient from named
 where (date_of_birth is not null and lead_dob is not null and date_of_birth = lead_dob)
    or ((date_of_birth is null or lead_dob is null) and phone_e164 is not null
        and phone_e164 in (mobile_phone, home_phone, work_phone, preferred_phone))
@@ -85,11 +87,22 @@ def link_patients_to_leads(conn, practice_id: int) -> dict[str, int]:
     lead_info: dict[Any, dict] = {}
     for pair in pairs:
         leads_per_patient.setdefault(pair["stride_id"], set()).add(pair["lead_id"])
-        patients_per_lead.setdefault(pair["lead_id"], set()).add(pair["stride_id"])
+        if pair["lead_patient"] is None:
+            patients_per_lead.setdefault(pair["lead_id"], set()).add(pair["stride_id"])
         lead_info[pair["lead_id"]] = pair
 
     for stride_id, lead_ids in leads_per_patient.items():
-        lead_id = _same_person_newest(lead_ids, lead_info) if len(lead_ids) > 1 else next(iter(lead_ids))
+        # Only a lead without a patient can be linked, but every lead that fits decides whether
+        # the match is clear: a twin already linked elsewhere (other phone) makes it ambiguous
+        # instead of handing this patient to the other twin (seen on demo, 2026-10-14).
+        free = {lead_id for lead_id in lead_ids if lead_info[lead_id]["lead_patient"] is None}
+        if not free:
+            continue
+        if len(lead_ids) > 1:
+            lead_id = (max(free, key=lambda i: lead_info[i]["created_at"])
+                       if _same_person_newest(lead_ids, lead_info) is not None else None)
+        else:
+            lead_id = next(iter(free))
         if lead_id is None or len(patients_per_lead[lead_id]) > 1:
             # Never guess between people: staff can link by hand later.
             conn.execute(
