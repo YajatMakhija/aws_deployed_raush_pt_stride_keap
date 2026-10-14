@@ -184,6 +184,22 @@ def test_stride_clinic_names_map_to_our_clinic_names():
     assert av.clinic_name(9, "Rausch PT – Dana Point", ours) == "Dana Point"
     assert av.clinic_name(9, "Somewhere else", ours) == "Somewhere else"
     assert av.clinic_name(None, None, ours) is None
+    # An id shared by several clinics is not in the id map; the name decides.
+    assert av.clinic_name(3170, "Laguna Niguel", {}, ["Laguna Niguel", "Dana Point"]) == "Laguna Niguel"
+    assert av.clinic_name(5, "Rausch PT – Mission Viejo", {}, ["Mission Viejo"]) == "Mission Viejo"
+
+
+def test_a_stride_location_shared_by_clinics_is_not_mapped_by_id():
+    class Conn:
+        def execute(self, sql, params=None):
+            return _Result([
+                {"id": 1, "name": "A", "location": "Laguna Niguel", "stride_location_id": 3170},
+                {"id": 1, "name": "A", "location": "Dana Point", "stride_location_id": 3170},
+                {"id": 2, "name": "B", "location": "Mission Viejo", "stride_location_id": 3169},
+            ])
+    _, by_id, clinics = av.practitioner_names(Conn(), 7)
+    assert by_id == {3169: "Mission Viejo"}
+    assert clinics == ["Dana Point", "Laguna Niguel", "Mission Viejo"]
 
 
 def test_table_check_is_asked_once_both_tables_exist():

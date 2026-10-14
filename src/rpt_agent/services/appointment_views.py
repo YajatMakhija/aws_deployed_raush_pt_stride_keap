@@ -178,9 +178,9 @@ def load_records(conn, practice_id: int, *, lower: datetime | None = None,
             "order by sa.start_utc,sa.stride_id limit %s",
             (practice_id, *window, lead_filter, lead_filter, limit + 1),
         ).fetchall()
-    names, location_names = practitioner_names(conn, practice_id, tables["booking"])
+    names, location_names, clinics = practitioner_names(conn, practice_id, tables["booking"])
     for row in native + imported:
-        row["location"] = clinic_name(row.get("location_id"), row.get("location"), location_names)
+        row["location"] = clinic_name(row.get("location_id"), row.get("location"), location_names, clinics)
     for row in native:
         row["clinician_name"] = names.get(str(row["clinician_id"]))
     imported_ids = {r["stride_appointment_id"] for r in imported}
@@ -206,25 +206,26 @@ def optional_tables(conn) -> dict:
     return dict(found)
 
 
-def clinic_name(location_id, raw: str | None, by_id: dict) -> str | None:
+def clinic_name(location_id, raw: str | None, by_id: dict, clinics=()) -> str | None:
     """Our clinic name for a visit, so the dashboard's location filter matches every source.
 
-    Stride ids map first. Otherwise Stride's own name is used, shortened to our clinic name
-    when it contains one ("Rausch PT – Laguna Niguel" -> "Laguna Niguel").
+    A Stride location id that belongs to exactly one clinic maps first. Otherwise the row's
+    own name is used (our bookings: the lead's clinic), shortened to our clinic name when it
+    contains one ("Rausch PT – Laguna Niguel" -> "Laguna Niguel").
     """
     if location_id in by_id:
         return by_id[location_id]
     if raw:
-        for name in sorted(set(by_id.values()), key=len, reverse=True):
+        for name in sorted(set(clinics) | set(by_id.values()), key=len, reverse=True):
             if name and name.lower() in raw.lower():
                 return name
     return raw
 
 
 def practitioner_names(conn, practice_id: int, booking_tables: bool = True):
-    """Clinician names by Stride user id and clinic names by Stride location id."""
+    """Clinician names by Stride user id, clinic names by (unshared) Stride location id, all clinics."""
     if not booking_tables:
-        return {}, {}
+        return {}, {}, []
     rows = conn.execute(
         "select c.stride_user_id as id,c.display_name as name,bl.name as location,"
         "bl.stride_location_id from clinicians c "
@@ -233,9 +234,17 @@ def practitioner_names(conn, practice_id: int, booking_tables: bool = True):
         "where c.practice_id=%s",
         (practice_id,),
     ).fetchall()
+    clinics = {r["location"] for r in rows if r["location"]}
+    # The Stride demo has one location for all three clinics; an id shared by several
+    # clinics says nothing about which one, so only one-to-one ids map.
+    by_id: dict = {}
+    for r in rows:
+        if r["stride_location_id"] is not None and r["location"]:
+            by_id.setdefault(r["stride_location_id"], set()).add(r["location"])
     return (
         {str(r["id"]): r["name"] for r in rows},
-        {r["stride_location_id"]: r["location"] for r in rows if r["stride_location_id"] is not None},
+        {key: names.pop() for key, names in by_id.items() if len(names) == 1},
+        sorted(clinics),
     )
 
 
