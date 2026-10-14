@@ -132,6 +132,9 @@ select row_to_json(lead) as lead,
          where bl.practice_id=lead.practice_id and bl.is_active) as location_names,
        (select string_agg(ct.name, ', ' order by ct.name) from case_types ct
          where ct.practice_id=lead.practice_id and ct.is_active) as case_type_names,
+       (select string_agg(ct.name||' = '||array_to_string(ct.aliases, ', '), '; ' order by ct.name)
+          from case_types ct where ct.practice_id=lead.practice_id and ct.is_active
+           and cardinality(ct.aliases)>0) as service_aliases,
        coalesce((select stride_booking_enabled from practice_settings ps
                   where ps.practice_id=lead.practice_id), false) as booking_enabled
 from lead
@@ -191,10 +194,13 @@ def call_case_variables(conn, lead_id: str) -> dict[str, str]:
     """Call variables for the booking agent: the lead's service and every service we book."""
     row = conn.execute(CONTEXT_SQL, {"lead_id": lead_id, "location": "", "case_type": ""}).fetchone()
     if not row:
-        return {"case_type": "", "case_types_offered": ""}
+        return {"case_type": "", "case_types_offered": "", "service_aliases": ""}
     return {
         "case_type": (row["case_type"] or {}).get("name", ""),
         "case_types_offered": row["case_type_names"] or "",
+        # Everyday words per service ("Physical Therapy = ortho, orthopedic; ..."): the agent maps
+        # "it's for ortho" to a service instead of asking the caller to pick between names.
+        "service_aliases": row["service_aliases"] or "",
     }
 
 
@@ -773,6 +779,9 @@ def book_slot(
                     )
                     return "IN_PROGRESS: a booking for this patient is already being made. Wait a moment."
                 appointment_id = created["id"]
+            # The date the patient confirmed on the call; compared with the Sheet's for staff.
+            conn.execute("update appointments set patient_dob=%s where id=%s",
+                         (patient.date_of_birth, appointment_id))
     if taken:
         return (
             f"TAKEN: someone is booking {_spoken_time(wanted_time)} on {_spoken_date(wanted_date)} "

@@ -597,7 +597,8 @@ def test_call_variables_name_the_matched_service_and_all_services(env):
     lead = env.lead(lead_type="knee")  # no service called 'knee': the default applies
     values = slot_booking.call_case_variables(env.db, lead)
     assert values == {"case_type": "Physical Therapy",
-                      "case_types_offered": "Physical Therapy, Physical Therapy - Pelvic"}
+                      "case_types_offered": "Physical Therapy, Physical Therapy - Pelvic",
+                      "service_aliases": ""}
 
 
 @pytest.mark.parametrize(("sheet_case", "expected"), [
@@ -625,3 +626,35 @@ def test_alias_said_on_the_call_picks_the_service(env):
     env.sync()
     message = env.find(env.lead(), case_type_name="Pelvic Floor")
     assert message.startswith("OPENINGS for Physical Therapy - Pelvic")
+
+
+def test_call_variables_list_the_everyday_words_for_each_service(env):
+    add_pelvic_service(env)
+    env.db.execute("update case_types set aliases=array['ortho','orthopedic'] "
+                   "where practice_id=%s and name='Physical Therapy'", (env.practice_id,))
+    values = slot_booking.call_case_variables(env.db, env.lead(lead_type="Ortho"))
+    assert values["case_type"] == "Physical Therapy"
+    assert values["service_aliases"] == "Physical Therapy = ortho, orthopedic"
+
+
+def test_booking_keeps_the_birthday_the_patient_confirmed_and_flags_a_difference(env):
+    # Client rule 2026-10-14: book with the date the patient says, keep the lead booked, and tell
+    # staff (dashboard + Sheet) that the Sheet's date differs.
+    from rpt_agent.services.appointment_views import dob_check
+    from rpt_agent.services.sheet_sync import build_sheet_snapshot
+
+    open_days(env, c5981={DAY1: ["09:00:00"]})
+    env.sync()
+    lead = env.lead()
+    env.find(lead)
+    assert env.book(lead, date=DAY1, time="9:00 AM", date_of_birth="1990-08-19").startswith("BOOKED")
+    on_file = env.one("select date_of_birth from leads where id=%s", lead)["date_of_birth"]
+    assert env.one("select patient_dob from appointments where lead_id=%s", lead)["patient_dob"].isoformat() == "1990-08-19"
+    assert dob_check(env.db, lead) == {"on_file": on_file.isoformat(), "said": "1990-08-19"}
+    sheet = build_sheet_snapshot(env.db, str(lead))["sheet"]
+    assert sheet["needs_review"].startswith("Check date of birth: Sheet has")
+    assert env.one("select status from leads where id=%s", lead)["status"] == "booked"
+    # Staff fix the Sheet; the profile sync updates the lead and the warning goes away.
+    env.db.execute("update leads set date_of_birth='1990-08-19' where id=%s", (lead,))
+    assert dob_check(env.db, lead) is None
+    assert build_sheet_snapshot(env.db, str(lead))["sheet"]["needs_review"] == ""

@@ -166,6 +166,18 @@ DASHBOARD_OUTCOMES = {
 }
 
 
+def _needs_review_text(conn, lead) -> str:
+    if lead["needs_review"]:
+        return "Needs Review"
+    from .appointment_views import dob_check  # local: appointment_views imports stride_import
+
+    differs = dob_check(conn, lead["id"])
+    if differs:
+        return (f"Check date of birth: Sheet has {differs['on_file']}, "
+                f"patient said {differs['said']} on the booking call")
+    return ""
+
+
 def build_sheet_snapshot(
     conn,
     lead_id: str,
@@ -258,7 +270,7 @@ def build_sheet_snapshot(
         "call_outcome": call_outcome,
         "message_outcome": message_outcome,
         "email_outcome": email_outcome,
-        "needs_review": "Needs Review" if lead["needs_review"] else "",
+        "needs_review": _needs_review_text(conn, lead),
         "transcript_link": dashboard_call_link(str(lead["id"])),
         "callback_at": callback_at,
     }

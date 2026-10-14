@@ -1,6 +1,6 @@
 """Booking records shared by the calendar, lead page, home page and board."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -140,6 +140,8 @@ class _Conn:
         self.queries.append((sql, params))
         if "to_regclass" in sql:
             return _Result([{"imports": True, "booking": True}])
+        if "a.patient_dob" in sql:
+            return _Result([{"on_file": date(1990, 8, 9), "said": date(1990, 8, 19)}])
         if "from appointments a join leads" in sql:
             return _Result([_row(lead_id=self.lead, location_id=3169, location="Lead's own text")])
         if "from stride_appointments sa" in sql:
@@ -164,10 +166,13 @@ def test_booking_card_reads_names_tags_and_the_call_moment():
     assert card["practitioner_name"] == "Joe Smith"  # our rows name clinicians from our table
     assert card["location"] == "Laguna Niguel"  # Stride location id wins over free text
     assert card["quote"] == "I'd prefer Joe if he is free please."
+    assert card["dob_check"] == {"on_file": "1990-08-09", "said": "1990-08-19"}
     # Every query is scoped to the practice and the lead, and nothing is written.
     for sql, params in conn.queries:
         assert not sql.lstrip().lower().startswith(("insert", "update", "delete"))
-        if "from appointments a join leads" in sql or "from stride_appointments sa" in sql:
+        if "a.patient_dob" in sql:
+            assert params == (lead,)  # one lead's own booking
+        elif "from appointments a join leads" in sql or "from stride_appointments sa" in sql:
             assert params[0] == 7 and params[5] == [str(lead)]
 
 

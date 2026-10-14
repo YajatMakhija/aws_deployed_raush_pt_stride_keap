@@ -275,12 +275,28 @@ def lead_bookings(conn, practice_id: int, lead_ids: list, now: datetime) -> dict
     return {lead: pick_booking(items, now) for lead, items in by_lead.items()}
 
 
+def dob_check(conn, lead_id) -> dict | None:
+    """The patient gave a different birthday on the booking call than the lead has (the Sheet's).
+
+    Booked anyway with the patient's date; staff correct the Sheet, and the Sheet's profile sync
+    then updates the lead, which clears this.
+    """
+    row = conn.execute(
+        "select l.date_of_birth as on_file,a.patient_dob as said from appointments a "
+        "join leads l on l.id=a.lead_id where a.lead_id=%s and a.patient_dob is not null "
+        "and l.date_of_birth is not null and a.patient_dob<>l.date_of_birth "
+        "and a.state in ('booking','scheduled','unknown') order by a.created_at desc limit 1",
+        (lead_id,),
+    ).fetchone()
+    return {"on_file": row["on_file"].isoformat(), "said": row["said"].isoformat()} if row else None
+
+
 def booking_card(conn, practice_id: int, lead_id, now: datetime) -> dict | None:
     """The lead page booking card: the chosen visit plus, for Elliot, the call moment."""
     chosen = lead_bookings(conn, practice_id, [lead_id], now).get(str(lead_id))
     if not chosen:
         return None
-    card = {**chosen, "quote": None}
+    card = {**chosen, "quote": None, "dob_check": dob_check(conn, lead_id)}
     if chosen["call_log_id"]:
         call = conn.execute(
             "select coalesce(ct.transcript_text,cl.transcript_text) as transcript_text "

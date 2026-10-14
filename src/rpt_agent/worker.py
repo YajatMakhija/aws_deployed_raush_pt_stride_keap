@@ -72,6 +72,7 @@ class Job:
     case_name: str = ""
     case_type: str = ""
     case_types_offered: str = ""
+    service_aliases: str = ""
 
 
 @dataclass(frozen=True)
@@ -350,6 +351,12 @@ def dispatch_job(trace: WorkflowTrace, job: Job, providers: ProviderClients) -> 
                     "location": str(job.location_id or ""),
                     "clinic_location": job.clinic, "case_name": job.case_name,
                     "case_type": job.case_type, "case_types_offered": job.case_types_offered,
+                    "service_aliases": job.service_aliases,
+                    # Read back for the patient to confirm ("August 9, 1990"), never asked cold.
+                    "date_of_birth_spoken": (
+                        f"{job.date_of_birth:%B} {job.date_of_birth.day}, {job.date_of_birth.year}"
+                        if job.date_of_birth else ""
+                    ),
                 }},
             })
         else:
