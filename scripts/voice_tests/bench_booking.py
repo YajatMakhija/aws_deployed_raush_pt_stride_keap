@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -125,7 +125,11 @@ def run_case(vapi: Vapi, base: dict, model: str, case, variables_for, cleanup) -
     last_name = make_last_name()
     dob = f"{random.randint(1965, 2001)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
     dob_words = datetime.strptime(dob, "%Y-%m-%d").strftime("%B %-d, %Y")
-    lead_id, variables = variables_for(f"{PATIENT_FIRST} {last_name}", dob)
+    case.patient_dob = dob
+    # The Sheet's birthday: the patient's own, or a wrong one (ten days later) for the correction case.
+    on_file = (datetime.strptime(dob, "%Y-%m-%d") + timedelta(days=10)).strftime("%Y-%m-%d") \
+        if case.wrong_dob_on_file else dob
+    lead_id, variables = variables_for(f"{PATIENT_FIRST} {last_name}", on_file, case.sheet_case)
     agent, patient = agent_assistant(base, model), patient_assistant(case, last_name, dob_words)
     opener = f"Hi, am I speaking with {PATIENT_FIRST} {last_name}?"
     transcript, agent_lines, tools, latencies = [("AGENT", opener)], [opener], [], []
@@ -197,7 +201,7 @@ def db_helpers(keep: bool):
         with conn_lock, shared.transaction():
             yield shared
 
-    def variables_for(name: str, dob: str) -> tuple[str, dict]:
+    def variables_for(name: str, dob: str, sheet_case: str = "Physical Therapy") -> tuple[str, dict]:
         first, _, last = name.partition(" ")
         with transaction() as conn:
             practice = conn.execute("select id from practices where slug='rausch-pt'").fetchone()["id"]
@@ -205,12 +209,14 @@ def db_helpers(keep: bool):
                 "insert into leads(practice_id,source_system,full_name,first_name,last_name,phone_e164,"
                 "date_of_birth,status,cadence_state,is_test,sms_opt_out,location,lead_type,status_reason) "
                 "values(%s,'dashboard',%s,%s,%s,%s,%s,'in_progress','paused',true,true,'Laguna Niguel',"
-                "'Physical Therapy','booking agent chat benchmark') returning id",
-                (practice, name, first, last, f"+1555{random.randint(1000000, 9999999)}", dob),
+                "%s,'booking agent chat benchmark') returning id",
+                (practice, name, first, last, f"+1555{random.randint(1000000, 9999999)}", dob, sheet_case),
             ).fetchone()["id"])
             case_variables = call_case_variables(conn, lead)
         return lead, {"lead_id": lead, "Patient_name": name, "patient_name": name, "call_attempt": "1",
-                      "clinic_location": "Laguna Niguel", "case_name": "Physical Therapy", **case_variables}
+                      "clinic_location": "Laguna Niguel", "case_name": sheet_case, "date_of_birth": dob,
+                      "date_of_birth_spoken": datetime.strptime(dob, "%Y-%m-%d").strftime("%B %-d, %Y"),
+                      **case_variables}
 
     def cleanup(lead_id: str) -> dict:
         with transaction() as conn:

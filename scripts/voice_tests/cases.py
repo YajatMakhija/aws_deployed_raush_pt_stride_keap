@@ -37,6 +37,10 @@ class Case:
     asks_before_transfer: bool = False  # transfer must come after the agent offered it
     must_say: list[str] = field(default_factory=list)      # regex, any agent line
     must_not_say: list[str] = field(default_factory=list)  # regex, no agent line
+    sheet_case: str = "Physical Therapy"  # the lead's Case column (sent as case_name)
+    wrong_dob_on_file: bool = False       # the Sheet's birthday differs from the patient's
+    booked_case: str | None = None        # case_type the booking must use (absent = the one on file)
+    books_with_patient_dob: bool = False  # booking must send the patient's own birthday
 
 
 BOOKING_BASE = (
@@ -45,6 +49,39 @@ BOOKING_BASE = (
 )
 
 CASES: list[Case] = [
+    Case(
+        "8a", "Referral says Ortho: confirm in its words, birthday read back",
+        "Confirm you are the patient and that now is fine. Keep the clinic. When asked if the visit is for "
+        "ortho, say yes. Any therapist. When your date of birth is read back and it is right, say yes. Pick "
+        "the first time offered. " + "When asked to spell your last name, spell it letter by letter.",
+        ["'Yes.'", "'Sure.'", "'Yes.'", "'Yes, ortho.'", "'Anyone.'", "(spell)", "'Yes, that's right.'", "'The first one.'"],
+        "Says 'this visit is for ortho', never offers the pelvic service, reads the birthday on file back "
+        "instead of asking for it, books Physical Therapy.",
+        must_call=[FIND, BOOK], booked=True, sheet_case="Ortho", booked_case="Physical Therapy",
+        must_say=[r"\bortho", r"date of birth (as|is)"], must_not_say=[r"pelvic", r"what is your date of birth"],
+    ),
+    Case(
+        "8b", "Patient says 'it's for ortho' when asked about Physical Therapy",
+        "Confirm you are the patient and that now is fine. Keep the clinic. When asked what the visit is for, "
+        "say: no, it's for ortho. Any therapist. Confirm your date of birth if it is right. Pick the first "
+        "time offered. When asked to spell your last name, spell it letter by letter.",
+        ["'Yes.'", "'Sure.'", "'Yes.'", "'No, it's for ortho.'", "'Anyone.'", "(spell)", "'Yes.'", "'First one.'"],
+        "Understands ortho = Physical Therapy without asking the patient to choose between services; books "
+        "Physical Therapy.",
+        must_call=[FIND, BOOK], booked=True, sheet_case="Physical Therapy", booked_case="Physical Therapy",
+        must_say=[r"ortho.*physical therapy|physical therapy.*ortho"], must_not_say=[r"pelvic"],
+    ),
+    Case(
+        "8c", "Birthday on file is wrong: patient corrects it",
+        "Confirm you are the patient and that now is fine. Keep the clinic and the service. Any therapist. "
+        "When your date of birth is read back, it is WRONG: say no, and give your real date of birth. Pick "
+        "the first time offered. When asked to spell your last name, spell it letter by letter.",
+        ["'Yes.'", "'Sure.'", "'Yes.'", "'Yes.'", "'Anyone.'", "(spell)", "'No, it's <your real date>.'", "'First one.'"],
+        "Reads the wrong birthday back, accepts the correction without fuss, books with the patient's date "
+        "(staff see a 'check date of birth' note on the dashboard and in the Sheet).",
+        must_call=[FIND, BOOK], booked=True, wrong_dob_on_file=True, books_with_patient_dob=True,
+        must_say=[r"date of birth (as|is)"],
+    ),
     Case(
         "1", "Busy → callback in 20 minutes",
         "You are busy at work. Confirm you are the patient. When asked if now is a good time, say you are "
@@ -248,6 +285,13 @@ def check_case(case: Case, agent_lines: list[str], tools: list[dict]) -> list[tu
         at = next((t["after_line"] for t in tools if t["name"] == TRANSFER), None)
         offered = at is not None and any(re.search(r"transfer|connect", line) for line in text[:at])
         checks.append(("offers before transferring", offered, f"transfer after agent line {at}"))
+    booking = next((t["args"] for t in tools if t["name"] == BOOK), None)
+    if case.booked_case and booking is not None:
+        used = booking.get("case_type") or case.booked_case  # absent = the service on file
+        checks.append((f"books {case.booked_case}", used == case.booked_case, f"case_type: {used}"))
+    if case.books_with_patient_dob and booking is not None:
+        checks.append(("books with the patient's birthday", booking.get("date_of_birth") == case.patient_dob,
+                       f"sent {booking.get('date_of_birth')}, patient {case.patient_dob}"))
     for pattern in case.must_say:
         checks.append((f"says /{pattern}/", any(re.search(pattern, line) for line in text), ""))
     for pattern in case.must_not_say + GENERIC_FORBIDDEN:
