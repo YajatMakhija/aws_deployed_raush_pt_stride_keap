@@ -2028,3 +2028,11 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   and Vapi webhooks now run their blocking work via `run_in_threadpool` (the trace id still carries over).
 - Watch: concurrent requests now share the DB pool (`DB_POOL_MAX_SIZE`, default 3, 5 s wait). Raise it if
   `PoolTimeout` shows up in the logs.
+
+### 2026-10-14 — Deploys no longer drop live calls
+- Incident: a deploy restarted the API at ~12:07 UTC; a live call's find_slots got 502 twice and the agent
+  said "booking system isn't responding".
+- Caddy now retries the API for up to 15 s (`lb_try_duration`) instead of a 502, under Vapi's 20 s timeout.
+- `api` gets `stop_grace_period: 30s` so an in-flight booking finishes, and `DB_POOL_MAX_SIZE=10` (was 3)
+  now that concurrent requests run in parallel threads. Caddyfile is bind-mounted: recreate the caddy
+  container after changing it (a `git pull` swaps the file, the old mount keeps the old one).

@@ -11,6 +11,12 @@ services:
     env_file: .env
     expose:
       - "8000"
+    # Concurrent calls' tool requests run in parallel threads; 3 connections let
+    # three slow bookings starve every other request (DB allows 60).
+    environment:
+      DB_POOL_MAX_SIZE: "10"
+    # Let an in-flight booking (up to ~15 s on Stride) finish before a deploy stops it.
+    stop_grace_period: 30s
     volumes:
       - ./logs:/app/logs
     # Liveness only. /ready also reports 503 while Stride booking is switched

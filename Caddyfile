@@ -4,5 +4,11 @@ stride.aibolt.ai {
     request_body /api/v1/dashboard/assistant {
         max_size 64KB
     }
-    reverse_proxy api:8000
+    # While the API restarts (a deploy), hold requests and retry for up to 15 s
+    # instead of answering 502 at once: under Vapi's 20 s tool timeout, so a
+    # live call rides through a deploy.
+    reverse_proxy api:8000 {
+        lb_try_duration 15s
+        lb_try_interval 250ms
+    }
 }
