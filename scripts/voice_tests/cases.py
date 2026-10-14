@@ -50,6 +50,17 @@ BOOKING_BASE = (
 
 CASES: list[Case] = [
     Case(
+        "8d", "Misheard clinic ('data point') and a muddled birthday",
+        "Confirm you are the patient and that now is fine. When told your clinic, say: can I change that to "
+        "data point? (you mean Dana Point, but say 'data point'). Keep the service. Anyone is fine. When your "
+        "date of birth is read back and it is right, say: yes that's correct. Pick the first time offered. "
+        "When asked to spell your last name, spell it letter by letter.",
+        ["'Yes.'", "'Sure.'", "'Can I change that to data point?'", "'Yes.'", "'Anyone.'", "(spell)", "'Yes.'", "'First one.'"],
+        "Takes 'data point' as Dana Point and says Dana Point back, never speaks notes or reasoning, books "
+        "at Dana Point.",
+        must_call=[FIND, BOOK], booked=True, must_say=[r"dana point"], must_not_say=[r"data point"],
+    ),
+    Case(
         "8a", "Referral says Ortho: confirm in its words, birthday read back",
         "Confirm you are the patient and that now is fine. Keep the clinic. When asked if the visit is for "
         "ortho, say yes. Any therapist. When your date of birth is read back and it is right, say yes. Pick "
@@ -227,7 +238,9 @@ CASES: list[Case] = [
 CASES_BY_ID = {case.id: case for case in CASES}
 
 # Checks that apply to every case.
-GENERIC_FORBIDDEN = [r"\bsarah\b", r"one moment", r"let me check", r"bear with me", r"just a sec"]
+GENERIC_FORBIDDEN = [r"\bsarah\b", r"one moment", r"let me check", r"bear with me", r"just a sec",
+                     # reasoning spoken aloud (demo call 2026-10-14: "We need answer typo Dana point ...")
+                     r"\btypo\b", r"\bensure\b", r"should confirm", r"must know", r"next service"]
 
 
 # Tools speak their own waiting message ("One moment, please, while I check our availability.") when

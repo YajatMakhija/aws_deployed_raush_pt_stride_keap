@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import threading
@@ -39,6 +40,7 @@ from cases import CASES, CASES_BY_ID, PATIENT_FIRST, TRANSFER, check_case, load_
 TOOLS_CONFIG = json.loads((ROOT / "config" / "vapi_booking_tools.json").read_text())
 ASSISTANT_ID = TOOLS_CONFIG["assistant_id"]
 PROMPT = (ROOT / "config" / "vapi_booking_assistant_prompt.md").read_text()
+REASONING_EFFORT = os.environ.get("BENCH_REASONING_EFFORT", "")  # e.g. low; empty = model default
 DEFAULT_MODELS = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]
 PATIENT_MODEL = "gpt-5.6-terra"
 MAX_TURNS = 28
@@ -72,6 +74,7 @@ def agent_assistant(base: dict, model: str) -> dict:
     return {
         "name": f"bench {model}",
         "model": {"provider": source.get("provider", "openai"), "model": model,
+                  **({"reasoningEffort": REASONING_EFFORT} if REASONING_EFFORT else {}),
                   "messages": [{"role": "system", "content": PROMPT}],
                   "toolIds": source.get("toolIds", [])},
         "server": base.get("server"),
