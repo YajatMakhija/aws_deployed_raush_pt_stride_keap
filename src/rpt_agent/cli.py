@@ -327,7 +327,7 @@ def sheet_archive(args) -> None:
     settings = get_settings()
     backend = GoogleSheetBackend(settings)
     grid = parse_grid(backend.read_values(), settings.google_sheet_header_row)
-    days = args.days or settings.sheet_archive_days
+    days = settings.sheet_archive_days if args.days is None else args.days
     rows = sheet_direct.archive_candidates(grid, days)
     out: dict[str, object] = {"days": days, "rows": [r.number for r in rows]}
     if args.apply:

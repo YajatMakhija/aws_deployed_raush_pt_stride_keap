@@ -172,3 +172,24 @@ def test_a_snapshot_without_action_status_keeps_the_outcome_cell():
     apply_snapshot(grid, {"lead_id": "L1", "sheet": {"call_outcome": "No answer"}})
     assert grid.rows[0].get("outcome_status") == "Cadence started"
     assert grid.rows[0].get("call_outcome") == "No answer"
+
+
+def test_sheet_archive_days_zero_is_not_the_default(monkeypatch):
+    from types import SimpleNamespace
+
+    from rpt_agent import cli
+
+    seen = {}
+
+    class Backend:
+        def __init__(self, settings):
+            pass
+
+        def read_values(self):
+            return FakeSheet().read_values()
+
+    monkeypatch.setattr("rpt_agent.services.google_sheet.GoogleSheetBackend", Backend)
+    monkeypatch.setattr("rpt_agent.services.sheet_direct.archive_candidates",
+                        lambda grid, days: seen.setdefault("days", days) and [])
+    cli.sheet_archive(SimpleNamespace(days=0, apply=False))
+    assert seen["days"] == 0
