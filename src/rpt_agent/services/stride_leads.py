@@ -38,26 +38,33 @@ REASON_UNCLEAR = "Unclear change in Stride"
 # first and last name, so a full-name comparison never matched them (seen in testing).
 # Two people in one family share a phone and surname but not a first name + DOB.
 _CANDIDATES_SQL = """
-select p.stride_id, l.id as lead_id, l.phone_e164, l.created_at
-from stride_patients p
-join leads l on l.practice_id=p.practice_id
- and l.stride_patient_id is null
- and (
-   lower(regexp_replace(trim(l.full_name),'\\s+',' ','g'))
-     = lower(regexp_replace(trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),'\\s+',' ','g'))
-   or (
-     nullif(trim(coalesce(l.last_name,'')),'') is null
-     and lower(trim(coalesce(nullif(trim(l.first_name),''), split_part(trim(l.full_name),' ',1))))
-       = lower(trim(coalesce(p.first_name,'')))
-     and position(' ' in trim(l.full_name)) = 0
-   )
- )
- and (
-   (p.date_of_birth is not null and l.date_of_birth is not null and p.date_of_birth=l.date_of_birth)
-   or ((p.date_of_birth is null or l.date_of_birth is null) and l.phone_e164 is not null
-       and l.phone_e164 in (p.mobile_phone,p.home_phone,p.work_phone,p.preferred_phone))
- )
-where p.practice_id=%s and p.lead_id is null and p.deleted_at is null
+with p as (
+  select p.stride_id, p.date_of_birth, p.mobile_phone, p.home_phone, p.work_phone, p.preferred_phone,
+    lower(regexp_replace(trim(coalesce(p.first_name,'')||' '||coalesce(p.last_name,'')),'\\s+',' ','g')) as full_key,
+    lower(trim(coalesce(p.first_name,''))) as first_key
+  from stride_patients p
+  where p.practice_id=%(practice)s and p.lead_id is null and p.deleted_at is null
+), l as (
+  select l.id, l.phone_e164, l.created_at, l.date_of_birth,
+    lower(regexp_replace(trim(l.full_name),'\\s+',' ','g')) as full_key,
+    case when nullif(trim(coalesce(l.last_name,'')),'') is null and position(' ' in trim(l.full_name)) = 0
+      then lower(trim(coalesce(nullif(trim(l.first_name),''), split_part(trim(l.full_name),' ',1))))
+    end as first_key
+  from leads l
+  where l.practice_id=%(practice)s and l.stride_patient_id is null
+), named as (
+  -- Two equality joins (hash joins) instead of one OR join: comparing every patient with
+  -- every lead took minutes on a full Stride history (50k patients x 3k leads, 2026-10-14).
+  select p.*, l.id as lead_id, l.phone_e164, l.created_at, l.date_of_birth as lead_dob
+  from p join l on l.full_key = p.full_key
+  union
+  select p.*, l.id, l.phone_e164, l.created_at, l.date_of_birth
+  from p join l on l.first_key is not null and l.first_key = p.first_key
+)
+select stride_id, lead_id, phone_e164, created_at from named
+where (date_of_birth is not null and lead_dob is not null and date_of_birth = lead_dob)
+   or ((date_of_birth is null or lead_dob is null) and phone_e164 is not null
+       and phone_e164 in (mobile_phone, home_phone, work_phone, preferred_phone))
 """
 
 
@@ -72,7 +79,7 @@ def link_patients_to_leads(conn, practice_id: int) -> dict[str, int]:
     ).fetchall()
     counts["linked"] += len(exact)
 
-    pairs = conn.execute(_CANDIDATES_SQL, (practice_id,)).fetchall()
+    pairs = conn.execute(_CANDIDATES_SQL, {"practice": practice_id}).fetchall()
     leads_per_patient: dict[int, set[Any]] = {}
     patients_per_lead: dict[Any, set[int]] = {}
     lead_info: dict[Any, dict] = {}
