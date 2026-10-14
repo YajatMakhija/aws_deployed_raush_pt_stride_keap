@@ -2019,3 +2019,12 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   now skips on any non-local database unless `CHAIN_TESTS_ALLOW_SHARED_DB=1`. Recovery: Mock Stride
   `last_success_at` was cleared so its next export resends everything; the Keap worker re-linked contacts
   by email (no duplicates). Run database tests only on a disposable local Postgres (tests/CLAUDE.md).
+
+### 2026-10-14 — Webhook routes no longer block each other
+- Incident: two demo calls at once. One call's `book_appointment` (14 s, live Stride) froze the API, so the
+  other call's `find_slots` passed Vapi's 20 s tool timeout and the agent hung up ("system isn't responding").
+- Cause: the `async def` webhook routes ran blocking DB/Stride code on the event loop; uvicorn runs one process.
+- Fix: booking tools, check-availability, create-appointment, lead-status, n8n lead-actions/lead-sync, Twilio
+  and Vapi webhooks now run their blocking work via `run_in_threadpool` (the trace id still carries over).
+- Watch: concurrent requests now share the DB pool (`DB_POOL_MAX_SIZE`, default 3, 5 s wait). Raise it if
+  `PoolTimeout` shows up in the logs.

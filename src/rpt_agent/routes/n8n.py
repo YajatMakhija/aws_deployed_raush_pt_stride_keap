@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 
 from ..db import record_integration_event
 from ..observability import WorkflowTrace, trace_id_var
@@ -107,7 +108,8 @@ async def lead_actions(request: Request):
     except HTTPException as exc:
         trace.log("authentication_failed", provider="n8n", status_code=exc.status_code)
         if request_id_raw and len(request_id_raw) <= 64:
-            record_integration_event(
+            await run_in_threadpool(
+                record_integration_event,
                 request_id_raw,
                 "inbound",
                 "n8n",
@@ -128,7 +130,8 @@ async def lead_actions(request: Request):
         parsed = json.loads(raw)
         payload = LeadActionRequest.model_validate(parsed)
     except (json.JSONDecodeError, ValidationError) as exc:
-        record_integration_event(
+        await run_in_threadpool(
+            record_integration_event,
             str(request_id),
             "inbound",
             "n8n",
@@ -146,13 +149,15 @@ async def lead_actions(request: Request):
         return JSONResponse(status_code=422, content={"detail": detail})
 
     trace.log("request_parsed", action=payload.action, request_id=str(request_id))
-    result = execute_lead_action(
+    result = await run_in_threadpool(
+        execute_lead_action,
         request_id=request_id,
         action=payload.action,
         lead_id=payload.lead_id,
         lead=payload.lead.model_dump(mode="python"),
     )
-    record_integration_event(
+    await run_in_threadpool(
+        record_integration_event,
         str(request_id),
         "inbound",
         "n8n",
@@ -173,7 +178,8 @@ async def lead_sync(request: Request):
         await require_n8n_intake_auth(request)
     except HTTPException as exc:
         if request_id_raw and len(request_id_raw) <= 64:
-            record_integration_event(
+            await run_in_threadpool(
+                record_integration_event,
                 request_id_raw,
                 "inbound",
                 "n8n",
@@ -199,12 +205,14 @@ async def lead_sync(request: Request):
         )
         return JSONResponse(status_code=422, content={"detail": detail})
 
-    result = sync_sheet_lead(
+    result = await run_in_threadpool(
+        sync_sheet_lead,
         request_id=request_id,
         lead_id=payload.lead_id,
         lead=payload.lead.model_dump(mode="python"),
     )
-    record_integration_event(
+    await run_in_threadpool(
+        record_integration_event,
         str(request_id),
         "inbound",
         "n8n",

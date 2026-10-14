@@ -1,4 +1,5 @@
 from fastapi import HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from ..db import record_integration_event
 from ..observability import WorkflowTrace, trace_id_var
@@ -20,7 +21,8 @@ async def authenticated_tool_request(
     if not isinstance(body, dict):
         raise TypeError("request body must be a JSON object")
     parsed = parse_tool_request(body)
-    record_integration_event(
+    await run_in_threadpool(
+        record_integration_event,
         trace.trace_id,
         "inbound",
         "vapi",

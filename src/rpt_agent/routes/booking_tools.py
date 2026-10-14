@@ -13,6 +13,7 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from ..providers import ProviderError
 from ..security import vapi_secret_scheme
@@ -73,7 +74,8 @@ async def find_slots_tool(request: Request):
         raw_date = str(arguments.get("specific_date") or arguments.get("date") or "").strip()
         if raw_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
             raise ValueError("BAD_DATE: send specific_date as YYYY-MM-DD.")
-        message = find_slots(
+        message = await run_in_threadpool(
+            find_slots,
             trace,
             lead_id=_lead_id(arguments),
             call_id=parsed.call_id,
@@ -123,7 +125,8 @@ async def list_providers_tool(request: Request):
         trace, parsed = await authenticated_tool_request(request, "list_providers")
         tool_call_id = parsed.tool_call_id
         arguments = parsed.arguments
-        message = list_providers(
+        message = await run_in_threadpool(
+            list_providers,
             lead_id=_lead_id(arguments),
             location_name=str(arguments.get("location") or "").strip() or None,
             case_type_name=str(arguments.get("case_type") or "").strip() or None,
@@ -164,7 +167,8 @@ async def book_appointment_tool(request: Request):
     try:
         trace, parsed = await authenticated_tool_request(request, "book_appointment")
         tool_call_id = parsed.tool_call_id
-        message = book_slot(
+        message = await run_in_threadpool(
+            book_slot,
             trace,
             lead_id=_lead_id(parsed.arguments),
             call_id=parsed.call_id,

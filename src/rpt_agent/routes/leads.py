@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from ..api_schemas import UpdateLeadStatusBody, documented_body
 from ..security import vapi_secret_scheme
@@ -37,7 +38,8 @@ async def lead_status(request: Request):
         callback_value = parsed.arguments.get("callback_requested_at")
         callback_at = datetime.fromisoformat(str(callback_value)) if callback_value else None
         event_value = parsed.arguments.get("outreach_event_id")
-        result = report_lead_status(
+        result = await run_in_threadpool(
+            report_lead_status,
             trace,
             lead_id=str(lead_id),
             status=str(status),

@@ -2,6 +2,7 @@ import re
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from ..api_schemas import CreateAppointmentBody, documented_body
 from ..providers import ProviderError
@@ -59,7 +60,8 @@ async def create_appointment(request: Request):
         if not raw_time:
             raise ValueError("Please provide the appointment time.")
         event_value = parsed.arguments.get("outreach_event_id")
-        result = BookingService().book_at(
+        result = await run_in_threadpool(
+            BookingService().book_at,
             trace,
             lead_id=str(lead_id),
             event_id=int(event_value) if event_value not in (None, "") else None,

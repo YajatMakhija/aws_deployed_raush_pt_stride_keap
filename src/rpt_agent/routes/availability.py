@@ -2,6 +2,7 @@ import re
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from ..api_schemas import CheckAvailabilityBody, documented_body
 from ..providers import ProviderError
@@ -36,7 +37,8 @@ async def check_availability(request: Request):
         requested_date = date.fromisoformat(str(raw_date)) if raw_date else None
         lead_id = parsed.arguments.get("lead_id")
         practice_id = parsed.arguments.get("practice_id")
-        message = BookingService().availability_message(
+        message = await run_in_threadpool(
+            BookingService().availability_message,
             trace,
             lead_id=str(lead_id) if lead_id else None,
             practice_id=int(practice_id) if practice_id is not None else None,

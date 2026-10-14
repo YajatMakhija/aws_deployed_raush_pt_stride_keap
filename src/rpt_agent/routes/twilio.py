@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..config import get_settings
 from ..db import transaction
@@ -33,6 +34,12 @@ async def twilio_inbound_sms(request: Request):
     sid = form_data.get("MessageSid") or f"missing-{uuid4().hex}"
     if not phone:
         raise HTTPException(status_code=400, detail="missing From")
+    await run_in_threadpool(_handle_inbound_sms, trace, phone, message_text, sid)
+    trace.complete()
+    return JSONResponse({"ok": True})
+
+
+def _handle_inbound_sms(trace: WorkflowTrace, phone: str, message_text: str, sid: str) -> None:
     with transaction() as conn:
         lead = conn.execute(
             "select id from leads where phone_e164=%s order by created_at desc limit 1", (phone,)
@@ -58,8 +65,6 @@ async def twilio_inbound_sms(request: Request):
                 source_key=f"twilio-inbound:{sid}",
             )
         trace.log("callback_requested", lead_id=str(lead["id"]))
-    trace.complete()
-    return JSONResponse({"ok": True})
 
 
 @router.post("/message-status", include_in_schema=False)
@@ -79,6 +84,12 @@ async def twilio_message_status(request: Request):
         raise HTTPException(status_code=400, detail="missing MessageSid")
     if status not in {"queued", "sent", "delivered", "undelivered", "failed"}:
         raise HTTPException(status_code=400, detail="invalid MessageStatus")
+    return await run_in_threadpool(_record_message_status, trace, form_data, sid, status)
+
+
+def _record_message_status(
+    trace: WorkflowTrace, form_data: dict[str, str], sid: str, status: str
+) -> dict[str, bool]:
     with transaction() as conn:
         receipt_id = f"message-status:{sid}:{status}"
         inserted = conn.execute(
