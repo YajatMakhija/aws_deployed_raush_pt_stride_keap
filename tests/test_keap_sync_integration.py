@@ -668,3 +668,38 @@ def test_only_leads_from_the_start_date_go_to_keap_unless_existing_leads_are_wan
                    (env.practice_id,))
     env.plan()
     assert env.row(old) is not None
+
+
+def test_a_repeat_referral_takes_over_the_old_leads_contact_and_gets_booked_tags(env):
+    # Demo, 2026-10-14: a patient re-added on the same number booked, but the new lead's row
+    # froze in needs_review ("already belongs to another person") and Keap kept Pending.
+    old = env.lead()
+    env.sync(old)
+    cid = env.row(old)["keap_contact_id"]
+    new = env.lead()
+    env.book(new)
+    assert env.sync(new) == "synced"
+    assert env.row(new)["keap_contact_id"] == cid and env.keap.counts["POST /contacts"] == 1
+    assert env.keap.contacts[cid]["tag_ids"] == ["180"]
+    released = env.row(old)
+    assert released["keap_contact_id"] is None and released["status"] == "skipped"
+    env.db.execute("update leads set updated_at=now() where id=%s", (old,))
+    env.plan()
+    assert env.row(old)["status"] == "skipped"  # the replaced lead never competes again
+
+
+def test_a_contact_held_by_a_stride_only_patient_still_needs_review_and_keeps_its_reason(env):
+    cid = env.keap.add_contact("Asha", "Rao", email="asha@example.test")
+    env.db.execute(
+        "insert into stride_patients(practice_id,stride_id,first_name,last_name) "
+        "values(%s,4999,'Asha','Rao')", (env.practice_id,))
+    env.db.execute(
+        "insert into keap_sync(practice_id,stride_patient_id,keap_contact_id,status) "
+        "values(%s,4999,%s,'synced')", (env.practice_id, cid))
+    lead = env.lead()
+    assert env.sync(lead) == "needs_review"
+    env.db.execute("update leads set status='booked',updated_at=now() where id=%s", (lead,))
+    env.plan()
+    row = env.row(lead)
+    assert row["status"] == "needs_review"
+    assert row["last_error"] == "Keap contact already belongs to another person"

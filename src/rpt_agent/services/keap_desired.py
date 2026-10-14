@@ -33,6 +33,9 @@ ENDED_LEAD_STATUSES = {"closed_no_response", "declined"}
 # People who asked us to stop, or whose number is wrong, never go to Keap: a Pending tag there can
 # start marketing emails or texts. Already in Keap -> left exactly as it is (spec 0.4 / R4).
 KEEP_OUT_LEAD_STATUSES = {"do_not_contact", "invalid_phone"}
+# A repeat patient comes back as a new lead on the same number; the newest lead owns the
+# person's Keap contact (keap_sync.claim_contact hands it over).
+REPLACED_SKIP = "replaced by a newer referral: the newer lead owns the Keap contact"
 # More than this many people queued in one tick is a bulk first load: patient-only
 # rows are spread out so new leads never wait behind the backlog.
 BULK_THRESHOLD = 200
@@ -174,6 +177,8 @@ def compute_desired(
     if lead is not None and lead.get("status") in KEEP_OUT_LEAD_STATUSES:
         return Built(freeze=True) if synced_before else Built(
             skip_reason="do not contact / wrong number: kept out of Keap")
+    if lead is not None and lead.get("superseded") and patient is None:
+        return Built(skip_reason=REPLACED_SKIP)
 
     # --- contact: Stride wins, except the phone (the lead's is the one we call) ---
     lead = lead or {}
@@ -423,7 +428,9 @@ def _load_context(conn, practice_id, rows, settings, mapping):
         r["id"]: dict(r)
         for r in conn.execute(
             "select id,full_name,first_name,last_name,email,phone_e164,date_of_birth,status,"
-            "is_test from leads where id=any(%s)",
+            "is_test,exists(select 1 from leads n where n.practice_id=l.practice_id "
+            " and n.phone_e164=l.phone_e164 and n.id<>l.id and n.created_at>l.created_at) "
+            "as superseded from leads l where id=any(%s)",
             (lead_ids,),
         )
     }
@@ -601,7 +608,7 @@ def _apply(conn, row, built: Built, queued_patient_rows: int) -> str:
     delay_minutes = (queued_patient_rows // BULK_THRESHOLD) if row["lead_id"] is None else 0
     conn.execute(
         "update keap_sync set desired=%s,desired_hash=%s,desired_at=now(),skip_reason=null,"
-        "last_error=null,status=case when status in ('syncing','needs_review') then status "
+        "last_error=case when status='needs_review' then last_error end,status=case when status in ('syncing','needs_review') then status "
         " when %s=synced_hash then 'synced' else 'pending' end,"
         "attempts=case when status in ('syncing','needs_review') then attempts else 0 end,"
         "next_attempt_at=case when status in ('syncing','needs_review') then next_attempt_at "

@@ -2036,3 +2036,12 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - `api` gets `stop_grace_period: 30s` so an in-flight booking finishes, and `DB_POOL_MAX_SIZE=10` (was 3)
   now that concurrent requests run in parallel threads. Caddyfile is bind-mounted: recreate the caddy
   container after changing it (a `git pull` swaps the file, the old mount keeps the old one).
+
+### 2026-10-14 — Keap: a repeat referral takes over the person's contact
+- Incident: a lead re-added on the same number booked, but its keap_sync row froze in `needs_review`
+  ("Keap contact already belongs to another person": the older lead's row held the contact), so Keap kept
+  Pending. The planner also wiped `last_error` on review rows, hiding why.
+- `keap_sync.claim_contact`: when the found contact is held by an OLDER lead on the same phone or email, the
+  newer lead takes it and the old row becomes `skipped` (`REPLACED_SKIP`). Anything else still needs review.
+- Planner: a lead with a newer lead on its number (and no Stride patient) is skipped, so it never competes
+  again; a `needs_review` row keeps its `last_error`.

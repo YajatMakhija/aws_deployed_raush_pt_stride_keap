@@ -24,6 +24,7 @@ from .keap_client import (
     KeapRateLimited,
     KeapRejected,
 )
+from .keap_desired import REPLACED_SKIP
 from .provider_http import ProviderError
 
 TEXT_TYPES = {"TEXT", "TEXT_AREA"}
@@ -154,6 +155,38 @@ def _save_contact_id(row_id: int, contact_id: str | None) -> None:
         conn.execute("update keap_sync set keap_contact_id=%s where id=%s", (contact_id, row_id))
 
 
+def claim_contact(conn, row: dict[str, Any], contact_id: str) -> bool:
+    """True when this row may use the contact; a repeat patient's newer lead takes it over.
+
+    A patient who comes back gets a new lead on the same number (review.hand_over_number),
+    and Keap finds the contact the old lead already holds. The newer lead owns the person
+    now, so the old row lets go; anything else is two people on one contact (review).
+    """
+    owner = conn.execute(
+        "select k.id,l.created_at,l.phone_e164,lower(l.email) as email from keap_sync k "
+        "left join leads l on l.id=k.lead_id "
+        "where k.practice_id=%s and k.keap_contact_id=%s and k.id<>%s for update of k",
+        (row["practice_id"], contact_id, row["id"]),
+    ).fetchone()
+    if owner is None:
+        return True
+    me = conn.execute(
+        "select created_at,phone_e164,lower(email) as email from leads where id=%s",
+        (row["lead_id"],),
+    ).fetchone() if row.get("lead_id") else None
+    same_person = me and owner["created_at"] and (
+        (me["phone_e164"] and me["phone_e164"] == owner["phone_e164"])
+        or (me["email"] and me["email"] == owner["email"])
+    )
+    if not same_person or owner["created_at"] >= me["created_at"]:
+        return False
+    conn.execute(
+        "update keap_sync set keap_contact_id=null,status='skipped',skip_reason=%s where id=%s",
+        (REPLACED_SKIP, owner["id"]),
+    )
+    return True
+
+
 def _find_existing(client: KeapClient, trace: WorkflowTrace, match: dict[str, Any]) -> list[str]:
     """Contacts that are this person: same name AND a shared email (else a shared phone)."""
     given = (match.get("given_name") or "").strip().casefold()
@@ -200,11 +233,7 @@ def sync_one(client: KeapClient, row: dict[str, Any], trace: WorkflowTrace) -> s
         if found:
             contact_id = found[0]
             with transaction() as conn:
-                taken = conn.execute(
-                    "select 1 from keap_sync where practice_id=%s and keap_contact_id=%s and id<>%s",
-                    (row["practice_id"], contact_id, row["id"]),
-                ).fetchone()
-                if taken:
+                if not claim_contact(conn, row, contact_id):
                     # Two people resolving to one contact would fight over its tags.
                     conn.execute(
                         "update keap_sync set status='needs_review',last_error=%s where id=%s",
