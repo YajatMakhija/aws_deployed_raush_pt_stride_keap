@@ -482,15 +482,23 @@ def build_desired(conn, practice_id: int, row: dict, settings: dict, mapping: li
                       datetime.now(UTC))
 
 
+# updated_at is stamped when a writer's transaction STARTS, but the row is visible only when it
+# commits: a change stamped before our last plan can land after it, and was then never planned
+# (a Stride booking left a Keap contact with no booked tag, demo 2026-10-14). So changes are
+# compared with the plan time minus a grace period; long Stride imports also clear desired_at
+# after they commit (stride_import_worker.replan_keap_since).
+REPLAN_GRACE = "interval '2 minutes'"
 _SELECT_ROWS = (
     "select k.* from keap_sync k "
     "left join leads l on l.id=k.lead_id "
     "left join stride_patients sp on sp.practice_id=k.practice_id and sp.stride_id=k.stride_patient_id "
     "where k.practice_id=%s and ("
-    " %s or k.desired_at is null or l.updated_at>k.desired_at or sp.updated_at>k.desired_at "
+    " %s or k.desired_at is null or l.updated_at>k.desired_at-" + REPLAN_GRACE + " "
+    " or sp.updated_at>k.desired_at-" + REPLAN_GRACE + " "
     " or exists(select 1 from stride_appointments a where a.practice_id=k.practice_id "
     "   and a.patient_stride_id=k.stride_patient_id "
-    "   and (a.updated_at>k.desired_at or (a.start_utc>k.desired_at and a.start_utc<=now())))) "
+    "   and (a.updated_at>k.desired_at-" + REPLAN_GRACE + " "
+    "        or (a.start_utc>k.desired_at and a.start_utc<=now())))) "
     "and (%s::timestamptz is null or k.desired_at is null or k.desired_at<%s) "
     "order by k.desired_at nulls first,k.id limit %s"
 )

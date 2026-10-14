@@ -189,6 +189,25 @@ def _reject_unregistered(settings: Settings, path: Path, sha256: str, size: int,
         )
 
 
+def replan_keap_since(started_at) -> None:
+    """After an import commits: re-plan every Keap row planned while it was running.
+
+    Rows written by the import carry its START time; a Keap plan made before the commit missed
+    them and would never look again (keap_desired._SELECT_ROWS). Clearing desired_at forces a
+    fresh plan from the committed data.
+    """
+    if started_at is None:
+        return
+    try:
+        with transaction() as conn:
+            conn.execute(
+                "update keap_sync set desired_at=null where desired_at>=%s and status<>'syncing'",
+                (started_at,),
+            )
+    except Exception:  # noqa: BLE001 - the planner's grace period still catches most of these
+        logging.getLogger(__name__).warning("keap_replan_failed", extra={"event": "keap_replan_failed"})
+
+
 def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
     try:
         size = path.stat().st_size
@@ -221,11 +240,13 @@ def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
     def progress(rows: int) -> None:
         write_heartbeat(settings, state="importing", current_file=path.name, rows_read=rows)
 
+    started_at = None
     try:
         with transaction() as conn:
             if not conn.execute(LOCK_SQL).fetchone()["locked"]:
                 _finish(attempt["id"], "retrying", "another importer is running")
                 return "locked"
+            started_at = conn.execute("select now() as t").fetchone()["t"]
             # A very large file may take minutes; never cut it off half way.
             conn.execute("set local statement_timeout = 0")
             practice = _practice(conn, settings)
@@ -271,6 +292,7 @@ def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
             _move(path, settings.stride_error_dir)
             return "failed"
         return "retry"
+    replan_keap_since(started_at)
     trace.log(
         "stride_file_processed",
         file=path.name,
@@ -298,10 +320,13 @@ def run_stride_import_tick(now: float | None = None) -> dict[str, int]:
         if outcome in {"retry", "locked"}:
             # Strict order: later exports wait until this one lands or is parked.
             break
+    reconciled_at = None
     with transaction() as conn:
         if conn.execute(LOCK_SQL).fetchone()["locked"]:
+            reconciled_at = conn.execute("select now() as t").fetchone()["t"]
             for key, value in reconcile_leads(conn, _practice(conn, settings)["id"]).items():
                 counts[f"leads_{key}"] = value
+    replan_keap_since(reconciled_at)
     write_heartbeat(settings, last_tick=counts)
     trace.complete(**counts)
     return counts

@@ -409,3 +409,32 @@ def test_planning_logs_contain_no_personal_data(env, caplog):
     with caplog.at_level("DEBUG"):
         env.plan()
     assert "secret.person" not in caplog.text and "5555550101" not in caplog.text
+
+
+def test_a_change_stamped_before_the_plan_but_committed_after_is_still_planned(env):
+    # Demo 2026-10-14: a Stride import stamped its rows at its transaction START (10:31:36) and
+    # committed after the Keap plan (10:31:41). The visit looked older than the plan, so the
+    # lead's contact never got its booked tag.
+    lead = env.lead("Late Commit", status="booked")
+    pid = env.patient("Late", "Commit", lead_id=lead)
+    env.plan()
+    assert env.tags(lead_id=lead) == []
+    planned_at = env.row(lead_id=lead)["desired_at"]
+    aid = env.appt(pid)
+    env.set_appt(aid, updated_at=planned_at - timedelta(seconds=5))
+    env.plan()
+    assert env.tags(lead_id=lead) == ["180"]
+
+
+def test_import_replans_keap_rows_planned_while_it_ran(env):
+    from rpt_agent.stride_import_worker import replan_keap_since
+
+    lead = env.lead("Replan Me")
+    env.plan()
+    before = env.row(lead_id=lead)["desired_at"]
+    replan_keap_since(before + timedelta(seconds=1))  # an import that started after the plan
+    assert env.row(lead_id=lead)["desired_at"] == before
+    replan_keap_since(before - timedelta(seconds=1))  # one that started before it
+    assert env.row(lead_id=lead)["desired_at"] is None
+    env.plan()
+    assert env.row(lead_id=lead)["desired_at"] is not None
