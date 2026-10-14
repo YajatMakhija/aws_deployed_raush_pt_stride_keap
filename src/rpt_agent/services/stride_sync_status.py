@@ -195,8 +195,10 @@ def stride_sync_status(conn, practice_id: int, now: datetime | None = None) -> d
                              f"The last file arrived {minutes} minutes ago; Stride usually sends one every "
                              "few minutes during clinic hours."))
     if files["skipped_today"]:
-        alerts.append(_alert("info", f"{files['skipped_today']} row(s) skipped today",
-                             "Some rows in Stride's files had errors and were left out; the rest loaded."))
+        # A warning, not info: a skipped row is a patient or visit we did not load (marked so staff see it).
+        alerts.append(_alert("warning", f"{files['skipped_today']} row(s) skipped today",
+                             "Some rows in Stride's files had errors and were left out; the rest loaded. "
+                             "Each file lists the row numbers and reasons."))
     if ambiguous:
         alerts.append(_alert("info", f"{ambiguous} patient(s) match more than one lead",
                              "We did not guess. Please check these by hand."))

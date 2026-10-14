@@ -246,7 +246,7 @@ def _good_patients(count, start=1000):
 
 def test_a_few_bad_rows_are_skipped_and_reported_without_patient_data(env):
     bad = [patient("102", dob="31/31/1990"), patient("103", action="True")]
-    # 2 bad of 202 rows is under the 1% limit: skip them, load the rest.
+    # 2 bad of 202 rows is under both limits (5% and 5 rows): skip them, load the rest.
     env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [*_good_patients(200), *bad]))
     env.tick()
     f = env.one("select status,applied_count,issue_count,issues from stride_import_files "
@@ -256,14 +256,32 @@ def test_a_few_bad_rows_are_skipped_and_reported_without_patient_data(env):
     assert "P1" not in str(f["issues"])
 
 
-def test_more_than_one_percent_bad_rows_rejects_the_whole_file(env):
-    bad = [patient("102", dob="31/31/1990"), patient("103", dob="1990-13-01"), patient("")]
+def test_one_bad_row_in_a_small_delta_file_does_not_reject_it(env):
+    # Before: 1 bad row of 3 (33%) rejected the whole file, and the 2 good changes waited for a fix.
+    env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [*_good_patients(2), patient("", first="X")]))
+    env.tick()
+    f = env.one("select status,applied_count,issue_count from stride_import_files where practice_id=%s",
+                env.practice_id)
+    assert (f["status"], f["applied_count"], f["issue_count"]) == ("processed", 2, 1)
+
+
+def test_many_bad_rows_reject_the_whole_file(env):
+    # 6 bad of 106 rows: more than 5% AND at least 5 rows -> something is wrong with the file.
+    bad = [patient(str(200 + i), dob="31/31/1990") for i in range(6)]
     env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [*_good_patients(100), *bad]))
     assert env.tick()["rejected"] == 1
     assert env.one("select count(*) n from stride_patients where practice_id=%s", env.practice_id)["n"] == 0
     f = env.one("select status,error from stride_import_files where practice_id=%s", env.practice_id)
-    assert f["status"] == "rejected" and f["error"].startswith("too many bad rows: 3 of 103")
+    assert f["status"] == "rejected" and f["error"].startswith("too many bad rows: 6 of 106")
     assert env.files("error") == ["patients_20261001100000.csv"]
+
+
+def test_five_percent_alone_does_not_reject_when_fewer_than_five_rows_are_bad(env):
+    bad = [patient(str(200 + i), dob="31/31/1990") for i in range(4)]  # 4 of 24 = 17%
+    env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [*_good_patients(20), *bad]))
+    env.tick()
+    assert env.one("select status from stride_import_files where practice_id=%s", env.practice_id)["status"] == (
+        "processed")
 
 
 def test_row_with_extra_columns_is_reported(env):
@@ -1025,3 +1043,26 @@ def test_every_booking_source_we_store_is_allowed_by_the_database(env):
                          "where conname='appointments_booking_source_check'")["d"]
     allowed = set(regex.findall(r"'([a-z_]+)'", definition))
     assert {stored for stored, _history, _label in BOOKING_SOURCES.values()} <= allowed
+
+
+def test_skipped_rows_are_marked_as_a_warning_on_the_dashboard(env):
+    env.drop("patients_20261001100000.csv", csv_bytes(PATIENT_HEADER, [*_good_patients(2), patient("", first="X")]))
+    env.tick()
+    assert ("warning", "1 row(s) skipped today") in _titles(_status(env))
+
+
+def test_do_not_contact_from_the_sheet_settles_an_old_review_note(env):
+    # A lead flagged "call could not be placed", then marked Do Not Contact, used to stay in
+    # Needs attention with the stale note. Do Not Contact now resolves it (Closed column).
+    from uuid import uuid4
+
+    from rpt_agent.services.lead_actions import _do_not_contact
+
+    lead = env.lead("Settled Note")
+    env.db.execute("update leads set status='needs_attention',needs_review=true,"
+                   "review_reason='dispatch failed: vapi returned HTTP 400' where id=%s", (lead,))
+    _do_not_contact(env.db, request_id=uuid4(), practice={"id": env.practice_id}, lead_id=lead,
+                    phone="+15552010000")
+    row = env.one("select status,needs_review,review_reason,review_resolved_at from leads where id=%s", lead)
+    assert (row["status"], row["needs_review"], row["review_reason"]) == ("do_not_contact", False, None)
+    assert row["review_resolved_at"] is not None

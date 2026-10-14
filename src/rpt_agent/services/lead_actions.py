@@ -442,6 +442,7 @@ def _do_not_contact(
     if lead["status"] != "do_not_contact":
         conn.execute(
             "update leads set call_opt_out=true,sms_opt_out=true,status='do_not_contact',"
+            "needs_review=false,review_reason=null,review_resolved_at=case when needs_review then now() else review_resolved_at end,"
             "cadence_state='terminated',last_call_outcome='do_not_contact',"
             "status_reason='staff selected Do Not Contact in Google Sheets',"
             "status_changed_at=now() where id=%s",

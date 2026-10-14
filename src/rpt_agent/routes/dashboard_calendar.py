@@ -203,12 +203,11 @@ class CalendarBooking(BaseModel):
 def create_calendar_appointment(payload: CalendarBooking, actor: Actor):
     with transaction() as conn:
         lead = _staff_lead(conn, actor, payload.lead_id)
-        blocked = conn.execute(
-            "select 1 from suppressed_numbers where phone_e164=%s", (lead["phone_e164"],),
-        ).fetchone()
-        if (blocked or lead["status"] == "do_not_contact"
-                or (lead["call_opt_out"] and lead["sms_opt_out"]) or lead["needs_review"]):
-            raise HTTPException(409, "Resolve the lead's contact restrictions or review before booking.")
+        # Opted out / Do Not Contact / blocked number do not stop a staff booking: the patient asked
+        # for it (e.g. phoned the clinic). Booking contacts nobody, the opt-outs and the number block
+        # stay, and the confirmation text is skipped by the notifier for them (user decision 2026-10-14).
+        if lead["needs_review"]:
+            raise HTTPException(409, "Resolve the lead's review before booking.")
         if lead["status"] == "booked":
             # The booking engine refuses too (it also sees Stride visits); answer early and plainly.
             raise HTTPException(409, _STAFF_MESSAGES["ALREADY_BOOKED"])

@@ -238,6 +238,7 @@ def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
                     import_file_id=attempt["id"],
                     timezone=practice["timezone"],
                     max_bad_row_percent=settings.stride_max_bad_row_percent,
+                    min_bad_rows_to_reject=settings.stride_min_bad_rows_to_reject,
                     progress=progress,
                 )
             if result.unclear_delete_patients:

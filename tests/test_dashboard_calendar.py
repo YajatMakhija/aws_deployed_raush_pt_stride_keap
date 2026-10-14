@@ -209,15 +209,12 @@ def test_slot_search_filters_the_practitioner_before_deduplicating_times(monkeyp
     assert captured["clinician_ids"] == [2]
 
 
-@pytest.mark.parametrize("restriction", ["review", "blocked", "do_not_contact", "opted_out", "booked"])
+@pytest.mark.parametrize("restriction", ["review", "booked"])
 def test_staff_booking_restrictions_stop_before_any_provider_call(monkeypatch, restriction):
     class Connection:
         def execute(self, sql, params):
-            if "from suppressed_numbers" in sql:
-                return Result([{"blocked": True}] if restriction == "blocked" else [])
             return Result([{"phone_e164": "+15550000001", "status": restriction,
-                            "call_opt_out": restriction == "opted_out",
-                            "sms_opt_out": restriction == "opted_out",
+                            "call_opt_out": False, "sms_opt_out": False,
                             "needs_review": restriction == "review"}])
 
     @contextmanager
@@ -233,6 +230,37 @@ def test_staff_booking_restrictions_stop_before_any_provider_call(monkeypatch, r
         calendar.create_calendar_appointment(calendar.CalendarBooking(lead_id=uuid4(), slot_id=1),
                                              DashboardActor("test", "test@example.test"))
     assert exc.value.status_code == 409
+
+
+@pytest.mark.parametrize("status,call_opt_out,sms_opt_out", [
+    ("do_not_contact", True, True), ("declined", True, True), ("in_progress", False, True)])
+def test_staff_can_book_a_patient_who_opted_out_but_phoned_in(monkeypatch, status, call_opt_out, sms_opt_out):
+    # Opt-outs stop OUR calls and texts; they must not stop staff booking a patient who asked for it.
+    lead_id = uuid4()
+
+    class Connection:
+        def execute(self, sql, params):
+            if "from leads where" in sql:
+                return Result([{"id": lead_id, "first_name": "Synthetic", "last_name": "Patient",
+                                "date_of_birth": date(1990, 1, 1), "email": None, "status": status,
+                                "call_opt_out": call_opt_out, "sms_opt_out": sms_opt_out,
+                                "needs_review": False, "phone_e164": "+15550000001"}])
+            if "from appointments where" in sql:
+                return Result([{"id": 7, "state": "scheduled", "start_utc": datetime(2026, 10, 13, 16, tzinfo=UTC)}])
+            return Result([{"local_date": date(2026, 10, 13), "local_time": datetime.min.time(),
+                            "display_name": "Synthetic Clinician", "timezone": "America/Los_Angeles"}])
+
+    @contextmanager
+    def transaction():
+        yield Connection()
+
+    called = []
+    monkeypatch.setattr(calendar, "transaction", transaction)
+    monkeypatch.setattr(calendar, "_audit", lambda *args: None)
+    monkeypatch.setattr(calendar.slot_booking, "book_slot", lambda trace, **kw: called.append(kw) or "BOOKED: ok")
+    saved = calendar.create_calendar_appointment(calendar.CalendarBooking(lead_id=lead_id, slot_id=3),
+                                                 DashboardActor("test", "test@example.test"))
+    assert called and saved["id"] == "booking:7"
 
 
 def _booking_harness(monkeypatch, engine_reply=None, engine_error=None):

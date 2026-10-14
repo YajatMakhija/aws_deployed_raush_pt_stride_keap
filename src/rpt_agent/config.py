@@ -57,7 +57,11 @@ class Settings(BaseSettings):
     # guards disk and import time, not memory.
     stride_max_file_mb: int = Field(default=2048, ge=1, le=102400)
     # Skip and report bad rows, but reject the whole file above this share.
-    stride_max_bad_row_percent: float = Field(default=1.0, ge=0, le=100)
+    # A file is rejected only when bad rows are BOTH more than this percent AND at least
+    # STRIDE_MIN_BAD_ROWS_TO_REJECT (like Snowflake's SKIP_FILE_<n>/<n>%): one typo in a small
+    # delta file must not throw the whole file away. Bad rows are always skipped and listed.
+    stride_max_bad_row_percent: float = Field(default=5.0, ge=0, le=100)
+    stride_min_bad_rows_to_reject: int = Field(default=5, ge=1)
     # Voice-agent booking engine (find-slots / book-appointment tools).
     # Stride demo slots only exist in the past, so testing pins "today" here.
     # Never set in production.

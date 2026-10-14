@@ -409,7 +409,10 @@ def report_lead_status(
             )
         elif normalized == "do_not_contact":
             conn.execute(
+                # Do Not Contact settles the lead: any older "needs attention" note is resolved, so
+                # the card moves to Closed instead of waiting for review (user decision 2026-10-14).
                 "update leads set call_opt_out=true,sms_opt_out=true,status='do_not_contact',"
+                "needs_review=false,review_reason=null,review_resolved_at=case when needs_review then now() else review_resolved_at end,"
                 "cadence_state='terminated',last_call_outcome='do_not_contact',status_reason=%s,"
                 "status_changed_at=now() where id=%s",
                 (note or "patient requested no further contact", lead_id),
@@ -558,6 +561,7 @@ def apply_call_outcome(
         elif outcome == "do_not_contact":
             conn.execute(
                 "update leads set call_opt_out=true,sms_opt_out=true,status='do_not_contact',"
+                "needs_review=false,review_reason=null,review_resolved_at=case when needs_review then now() else review_resolved_at end,"
                 "cadence_state='terminated',last_call_outcome=%s,status_reason=%s,"
                 "status_changed_at=now() where id=%s",
                 (outcome, "caller explicitly requested no contact", lead_id),
@@ -615,8 +619,12 @@ def explicit_opt_out(trace: WorkflowTrace, phone: str, channel: str, source: str
             conn.execute(
                 f"update leads set {column}=true,status=case when %s then 'do_not_contact' else status end,"
                 "cadence_state=case when %s then 'terminated' else cadence_state end,"
+                "review_resolved_at=case when %s and needs_review then now() else review_resolved_at end,"
+                "review_reason=case when %s then null else review_reason end,"
+                "needs_review=case when %s then false else needs_review end,"
                 "status_changed_at=case when %s then now() else status_changed_at end where id=%s",
-                (other_opted_out, other_opted_out, other_opted_out, lead["id"]),
+                (other_opted_out, other_opted_out, other_opted_out, other_opted_out, other_opted_out,
+                 other_opted_out, lead["id"]),
             )
             conn.execute(
                 "update outreach_events set status='skipped',updated_at=now() "

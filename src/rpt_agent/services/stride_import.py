@@ -466,7 +466,8 @@ def apply_file(
     practice_id: int,
     import_file_id: int,
     timezone: str,
-    max_bad_row_percent: float = 1.0,
+    max_bad_row_percent: float = 5.0,
+    min_bad_rows_to_reject: int = 5,
     progress: Callable[[int], None] | None = None,
     progress_every: int = 50_000,
 ) -> ApplyResult:
@@ -501,9 +502,10 @@ def apply_file(
             raise StrideFileError(f"CSV could not be parsed near row {result.row_count + 2}: {exc}") from exc
 
     bad = len(result.issues)
-    if result.row_count and bad * 100 > max_bad_row_percent * result.row_count:
+    if result.row_count and bad >= min_bad_rows_to_reject and bad * 100 > max_bad_row_percent * result.row_count:
         raise StrideFileError(
-            f"too many bad rows: {bad} of {result.row_count} (limit {max_bad_row_percent:g}%)"
+            f"too many bad rows: {bad} of {result.row_count} "
+            f"(limit {max_bad_row_percent:g}% and at least {min_bad_rows_to_reject})"
         )
 
     params = {"practice_id": practice_id, "entity": spec.other_entity, "import_file_id": import_file_id}

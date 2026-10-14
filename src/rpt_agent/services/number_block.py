@@ -55,7 +55,8 @@ def block_number(conn, lead: dict, staff_name: str) -> None:
     lead_id = str(lead["id"])
     conn.execute(
         "update leads set status='do_not_contact',cadence_state='terminated',call_opt_out=true,"
-        "sms_opt_out=true,status_reason='staff selected Do Not Contact in the dashboard',"
+        "sms_opt_out=true,needs_review=false,review_reason=null,review_resolved_at=case when needs_review then now() else review_resolved_at end,"
+        "status_reason='staff selected Do Not Contact in the dashboard',"
         "status_changed_at=now() where id=%s",
         (lead_id,),
     )
