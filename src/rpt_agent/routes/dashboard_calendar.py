@@ -39,10 +39,7 @@ def appointment_calendar(actor: Actor, start: date, end: date, lead_id: UUID | N
         ).fetchone() or {}
         timezone = settings.get("stride_location_timezone") or "America/Los_Angeles"
         lower, upper = calendar_window(start, end, timezone)
-        tables = conn.execute(
-            "select to_regclass('public.stride_appointments') is not null as imports,"
-            "to_regclass('public.clinician_assignments') is not null as booking"
-        ).fetchone()
+        tables = appointment_views.optional_tables(conn)
         records, truncated = appointment_views.load_records(
             conn, actor.practice_id, lower=lower, upper=upper,
             lead_ids=[lead_id] if lead_id else None, limit=MAX_RECORDS,

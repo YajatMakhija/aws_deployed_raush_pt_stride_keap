@@ -129,10 +129,7 @@ def load_records(conn, practice_id: int, *, lower: datetime | None = None,
     lead_filter = [str(i) for i in lead_ids] if lead_ids is not None else None
     if lead_filter == []:
         return [], False
-    tables = conn.execute(
-        "select to_regclass('public.stride_appointments') is not null as imports,"
-        "to_regclass('public.clinician_assignments') is not null as booking"
-    ).fetchone()
+    tables = optional_tables(conn)
     window = (lower, lower, upper, upper)
     # Once Stride has the visit, its copy (even a removed one) is the truth, not ours.
     mirror_filter = (
@@ -183,7 +180,7 @@ def load_records(conn, practice_id: int, *, lower: datetime | None = None,
         ).fetchall()
     names, location_names = practitioner_names(conn, practice_id, tables["booking"])
     for row in native + imported:
-        row["location"] = location_names.get(row.get("location_id")) or row.get("location")
+        row["location"] = clinic_name(row.get("location_id"), row.get("location"), location_names)
     for row in native:
         row["clinician_name"] = names.get(str(row["clinician_id"]))
     imported_ids = {r["stride_appointment_id"] for r in imported}
@@ -192,6 +189,36 @@ def load_records(conn, practice_id: int, *, lower: datetime | None = None,
                 if r["stride_appointment_id"] not in imported_ids]
     records.sort(key=lambda r: (r["start_utc"], r["id"]))
     return records[:limit], len(records) > limit
+
+
+_TABLES: dict = {}
+
+
+def optional_tables(conn) -> dict:
+    """Which optional tables exist. Once both do they always will, so ask the database once."""
+    if _TABLES.get("imports") and _TABLES.get("booking"):
+        return _TABLES
+    found = conn.execute(
+        "select to_regclass('public.stride_appointments') is not null as imports,"
+        "to_regclass('public.clinician_assignments') is not null as booking"
+    ).fetchone()
+    _TABLES.update(found)
+    return dict(found)
+
+
+def clinic_name(location_id, raw: str | None, by_id: dict) -> str | None:
+    """Our clinic name for a visit, so the dashboard's location filter matches every source.
+
+    Stride ids map first. Otherwise Stride's own name is used, shortened to our clinic name
+    when it contains one ("Rausch PT – Laguna Niguel" -> "Laguna Niguel").
+    """
+    if location_id in by_id:
+        return by_id[location_id]
+    if raw:
+        for name in sorted(set(by_id.values()), key=len, reverse=True):
+            if name and name.lower() in raw.lower():
+                return name
+    return raw
 
 
 def practitioner_names(conn, practice_id: int, booking_tables: bool = True):

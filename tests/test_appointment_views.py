@@ -176,3 +176,23 @@ def test_no_leads_means_no_queries():
         def execute(self, *_):
             raise AssertionError("queried for an empty lead list")
     assert av.lead_bookings(Never(), 7, [], NOW) == {}
+
+
+def test_stride_clinic_names_map_to_our_clinic_names():
+    ours = {3169: "Laguna Niguel", 3170: "Dana Point"}
+    assert av.clinic_name(3169, "Anything", ours) == "Laguna Niguel"
+    assert av.clinic_name(9, "Rausch PT – Dana Point", ours) == "Dana Point"
+    assert av.clinic_name(9, "Somewhere else", ours) == "Somewhere else"
+    assert av.clinic_name(None, None, ours) is None
+
+
+def test_table_check_is_asked_once_both_tables_exist():
+    class Conn:
+        calls = 0
+
+        def execute(self, sql):
+            Conn.calls += 1
+            return _Result([{"imports": True, "booking": True}])
+    av.optional_tables(Conn())
+    av.optional_tables(Conn())
+    assert Conn.calls == 1
