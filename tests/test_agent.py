@@ -682,3 +682,10 @@ def test_terminal_bounds_chat_history_before_sending():
     snapshot = list(messages)
     assert append_question("x" * 4001, messages) == "Questions must be at most 4000 characters."
     assert messages == snapshot
+
+
+def test_times_reach_the_model_in_clinic_time():
+    # 13:00 UTC on 16 June is 6 AM Pacific (daylight time); in January it is 5 AM.
+    assert agent_service._clinic_value(datetime(2026, 6, 16, 13, tzinfo=UTC)) == "Tue 2026-06-16 06:00 AM PT"
+    assert agent_service._clinic_value(datetime(2026, 1, 6, 13, tzinfo=UTC)) == "Tue 2026-01-06 05:00 AM PT"
+    assert agent_service._clinic_value(date(2026, 1, 6)) == "2026-01-06"
