@@ -93,20 +93,27 @@ with lead as (
   select bl.id,bl.name,bl.stride_location_id,bl.timezone from booking_locations bl, lead
   where bl.practice_id=lead.practice_id and bl.is_active
     and lower(bl.name)=lower(coalesce(nullif(%(location)s,''),lead.location,''))
+), wanted as (
+  select lower(trim(coalesce(nullif(%(case_type)s,''),lead.lead_type,''))) as name,
+         %(case_type)s<>'' as spoken from lead
 ), kind as (
-  -- The service said on the call wins (exact name, else a unique partial match such
-  -- as 'pelvic'); otherwise the lead's case, else the practice default.
-  select ct.id,ct.name,ct.stride_appointment_type_id,ct.duration_minutes from case_types ct, lead
-  where ct.practice_id=lead.practice_id and ct.is_active
-    and case when %(case_type)s<>'' then
-          lower(ct.name)=lower(%(case_type)s)
-          or (strpos(lower(ct.name),lower(%(case_type)s))>0
-              and (select count(*) from case_types other
-                    where other.practice_id=lead.practice_id and other.is_active
-                      and strpos(lower(other.name),lower(%(case_type)s))>0)=1)
-        else lower(ct.name)=lower(coalesce(lead.lead_type,'')) or ct.is_default end
-  order by (lower(ct.name)=lower(coalesce(nullif(%(case_type)s,''),lead.lead_type,''))) desc
-  limit 1
+  -- The service said on the call wins, else the lead's case from the Sheet. Each matches the name
+  -- or one of its aliases ("Ortho", "pelvic floor"), else a unique partial match ("pelvic"); only
+  -- the Sheet's case may fall back to the practice default (seen on demo 2026-10-14: "Pelvic"
+  -- in the Sheet used to get the default case).
+  select id,name,stride_appointment_type_id,duration_minutes from (
+    select ct.id,ct.name,ct.stride_appointment_type_id,ct.duration_minutes,
+      case when lower(ct.name)=wanted.name
+                or wanted.name=any(select lower(alias) from unnest(ct.aliases) alias) then 0
+           when wanted.name<>'' and strpos(lower(ct.name),wanted.name)>0
+                and (select count(*) from case_types other
+                      where other.practice_id=ct.practice_id and other.is_active
+                        and strpos(lower(other.name),wanted.name)>0)=1 then 1
+           when ct.is_default and not wanted.spoken then 2
+      end as rank
+    from case_types ct, lead, wanted
+    where ct.practice_id=lead.practice_id and ct.is_active
+  ) ranked where rank is not null order by rank limit 1
 )
 select row_to_json(lead) as lead,
        (select row_to_json(loc) from loc) as location,

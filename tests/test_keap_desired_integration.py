@@ -128,6 +128,9 @@ def env(monkeypatch):
     yield Env()
 
     conn.execute("delete from keap_sync where practice_id=%s", (practice,))
+    conn.execute("delete from appointments where practice_id=%s", (practice,))
+    conn.execute("delete from clinicians where practice_id=%s", (practice,))
+    conn.execute("delete from case_types where practice_id=%s", (practice,))
     conn.execute("delete from keap_appointment_types where practice_id=%s", (practice,))
     for table in ("stride_appointments", "stride_patients", "stride_users"):
         conn.execute(f"delete from {table} where practice_id=%s", (practice,))
@@ -438,3 +441,54 @@ def test_import_replans_keap_rows_planned_while_it_ran(env):
     assert env.row(lead_id=lead)["desired_at"] is None
     env.plan()
     assert env.row(lead_id=lead)["desired_at"] is not None
+
+
+def _our_booking(env, lead, *, state="scheduled", days=3, stride_appointment_id=None, clinician=5980):
+    case = env.one("select id from case_types where practice_id=%s and stride_appointment_type_id=2",
+                   env.practice_id)
+    if case is None:
+        case = env.one("insert into case_types(practice_id,name,stride_appointment_type_id,duration_minutes,"
+                       "is_default) values(%s,'Physical Therapy',2,60,true) returning id", env.practice_id)
+        env.db.execute("insert into clinicians(practice_id,stride_user_id,display_name) "
+                       "values(%s,5980,'Joe Smith')", (env.practice_id,))
+    start = datetime.now(UTC) + timedelta(days=days)
+    return env.one(
+        "insert into appointments(lead_id,practice_id,booking_source,state,start_utc,end_utc,"
+        "clinician_id,case_type_id,stride_appointment_id) values(%s,%s,'voice_agent',%s,%s,%s,%s,%s,%s) "
+        "returning id", lead, env.practice_id, state, start, start + timedelta(hours=1), clinician,
+        case["id"], stride_appointment_id)["id"]
+
+
+def test_elliot_booking_tags_keap_before_stride_exports_it(env):
+    # Demo 2026-10-14: Elliot booked a lead; Keap lost Pending but got no booked tag because the
+    # tag came only from Stride's export (which the demo Stride never sends).
+    lead = env.lead(status="booked")
+    _our_booking(env, lead, stride_appointment_id=77001)
+    env.plan()
+    d = env.row(lead_id=lead)["desired"]
+    assert d["tags"] == ["180"] and d["fields"]["10"]["value"] == "Joe Smith"
+    assert d["fields"]["6"]["value"] is not None
+
+
+def test_stride_copy_replaces_our_booking_once_imported(env):
+    lead = env.lead(status="booked")
+    _our_booking(env, lead, stride_appointment_id=77002)
+    pid = env.patient(lead_id=lead)
+    env.db.execute("update leads set stride_patient_id=%s where id=%s", (pid, lead))
+    env.db.execute("update keap_sync set stride_patient_id=%s where lead_id=%s", (pid, lead))
+    env.plan()
+    assert env.tags(lead_id=lead) == ["180"]
+    # Stride's copy of that same visit arrives cancelled: Stride is the record, the tag goes.
+    env.db.execute(
+        "insert into stride_appointments(practice_id,stride_id,patient_stride_id,appointment_type_id,"
+        "appointment_type,status,start_utc,clinician_id) values(%s,77002,%s,2,'x','Cancel',now()+interval '3 days',7)",
+        (env.practice_id, pid))
+    env.plan()
+    assert env.tags(lead_id=lead) == []
+
+
+def test_our_cancelled_booking_does_not_tag(env):
+    lead = env.lead(status="needs_attention")
+    _our_booking(env, lead, state="cancelled")
+    env.plan()
+    assert env.tags(lead_id=lead) == [PENDING]

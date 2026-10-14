@@ -40,6 +40,10 @@ BULK_THRESHOLD = 200
 # the clipped value, or every sync would see a 'difference' and a name search would never match.
 KEAP_NAME_MAX = 40
 
+# Our appointments.state in Stride's words, so one set of tag rules covers both.
+_OUR_STATE_AS_STRIDE = {"scheduled": "Unmarked", "unknown": "Unmarked", "completed": "Checked In",
+                        "cancelled": "Cancel", "no_show": "No Show"}
+
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
@@ -216,8 +220,8 @@ def compute_desired(
     for a in appointments:
         if a.get("appointment_type_id") not in by_type or a.get("start_utc") is None:
             continue
-        if a["start_utc"] < start_at:
-            continue  # history before go-live never tags anyone
+        if (a.get("booked_at") or a["start_utc"]) < start_at:
+            continue  # history before go-live never tags anyone (our bookings: when made)
         status = (a.get("status") or "").strip().lower()
         if a.get("deleted_at") is None and status not in CANCELLED_STATUSES:
             live.append(a)
@@ -437,13 +441,32 @@ def _load_context(conn, practice_id, rows, settings, mapping):
     type_ids = [int(m["stride_appointment_type_id"]) for m in mapping]
     if patient_ids and type_ids:
         for r in conn.execute(
-            "select patient_stride_id,appointment_type_id,status,start_utc,starts_at_local,"
+            "select stride_id,patient_stride_id,appointment_type_id,status,start_utc,starts_at_local,"
             "clinician_id,clinician_name,deleted_at from stride_appointments "
             "where practice_id=%s and patient_stride_id=any(%s) and appointment_type_id=any(%s) "
             "and start_utc>=%s",
             (practice_id, patient_ids, type_ids, settings["keap_sync_start_at"]),
         ):
             appointments.setdefault(r["patient_stride_id"], []).append(dict(r))
+    # Our own confirmed bookings (Elliot, staff) count at once, keyed ("lead", id): Keap shows the
+    # booking the moment it is made, not only after Stride's next export. Before this, a lead
+    # booked by Elliot lost Pending and had no booked tag until the export (forever on the demo,
+    # whose Stride never exports, 2026-10-14). Stride's copy replaces ours once imported.
+    if lead_ids and type_ids:
+        for r in conn.execute(
+            "select a.lead_id,a.stride_appointment_id,ct.stride_appointment_type_id as appointment_type_id,"
+            "a.state,a.start_utc,a.created_at as booked_at,a.clinician_id,c.display_name as clinician_name "
+            "from appointments a join case_types ct on ct.id=a.case_type_id "
+            "left join clinicians c on c.practice_id=a.practice_id and c.stride_user_id=a.clinician_id "
+            "where a.practice_id=%s and a.lead_id=any(%s) and a.start_utc is not null "
+            "and a.state in ('scheduled','unknown','completed','cancelled','no_show') "
+            "and ct.stride_appointment_type_id=any(%s)",
+            (practice_id, lead_ids, type_ids),
+        ):
+            row = dict(r)
+            row.update(status=_OUR_STATE_AS_STRIDE[row.pop("state")], starts_at_local=None,
+                       deleted_at=None, stride_id=row["stride_appointment_id"])
+            appointments.setdefault(("lead", row["lead_id"]), []).append(row)
     clinician_ids = {
         a["clinician_id"] for appts in appointments.values() for a in appts if a["clinician_id"]
     }
@@ -460,11 +483,14 @@ def _load_context(conn, practice_id, rows, settings, mapping):
 
 def _build_row(row, leads, patients, appointments, users, settings, mapping, now) -> Built:
     patient_id = row["stride_patient_id"]
+    stride = appointments.get(patient_id, []) if patient_id else []
+    seen = {a["stride_id"] for a in stride}
+    ours = [a for a in appointments.get(("lead", row["lead_id"]), []) if a["stride_id"] not in seen]
     return compute_desired(
         lead=leads.get(row["lead_id"]) if row["lead_id"] else None,
         patient=patients.get(patient_id) if patient_id else None,
         patient_id=patient_id,
-        appointments=appointments.get(patient_id, []) if patient_id else [],
+        appointments=stride + ours,
         users=users,
         settings=settings,
         mapping=mapping,
@@ -498,7 +524,9 @@ _SELECT_ROWS = (
     " or exists(select 1 from stride_appointments a where a.practice_id=k.practice_id "
     "   and a.patient_stride_id=k.stride_patient_id "
     "   and (a.updated_at>k.desired_at-" + REPLAN_GRACE + " "
-    "        or (a.start_utc>k.desired_at and a.start_utc<=now())))) "
+    "        or (a.start_utc>k.desired_at and a.start_utc<=now()))) "
+    " or exists(select 1 from appointments ap where ap.lead_id=k.lead_id "
+    "   and ap.updated_at>k.desired_at-" + REPLAN_GRACE + ")) "
     "and (%s::timestamptz is null or k.desired_at is null or k.desired_at<%s) "
     "order by k.desired_at nulls first,k.id limit %s"
 )

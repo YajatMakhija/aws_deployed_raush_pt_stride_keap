@@ -598,3 +598,30 @@ def test_call_variables_name_the_matched_service_and_all_services(env):
     values = slot_booking.call_case_variables(env.db, lead)
     assert values == {"case_type": "Physical Therapy",
                       "case_types_offered": "Physical Therapy, Physical Therapy - Pelvic"}
+
+
+@pytest.mark.parametrize(("sheet_case", "expected"), [
+    ("Pelvic", "Physical Therapy - Pelvic"),        # was the default case before 2026-10-14
+    ("pelvic floor", "Physical Therapy - Pelvic"),  # alias
+    ("Ortho", "Physical Therapy"),                  # alias
+    ("Physical Therapy - Pelvic", "Physical Therapy - Pelvic"),
+    ("knee", "Physical Therapy"),                   # nothing fits: the practice default
+])
+def test_sheet_case_maps_to_the_right_service(env, sheet_case, expected):
+    add_pelvic_service(env)
+    env.db.execute("update case_types set aliases=array['ortho','orthopedic'] "
+                   "where practice_id=%s and name='Physical Therapy'", (env.practice_id,))
+    env.db.execute("update case_types set aliases=array['pelvic floor','pelvic health'] "
+                   "where practice_id=%s and name='Physical Therapy - Pelvic'", (env.practice_id,))
+    lead = env.lead(lead_type=sheet_case)
+    assert slot_booking.call_case_variables(env.db, lead)["case_type"] == expected
+
+
+def test_alias_said_on_the_call_picks_the_service(env):
+    add_pelvic_service(env)
+    env.db.execute("update case_types set aliases=array['pelvic floor'] "
+                   "where practice_id=%s and name='Physical Therapy - Pelvic'", (env.practice_id,))
+    open_days(env, c5981={DAY1: ["09:00:00"]}, c5982={DAY1: ["13:00:00"]})
+    env.sync()
+    message = env.find(env.lead(), case_type_name="Pelvic Floor")
+    assert message.startswith("OPENINGS for Physical Therapy - Pelvic")
