@@ -653,3 +653,18 @@ def test_an_email_that_would_change_keaps_search_filter_never_matches():
                         audit_enabled=False)
     for bad in ("a@b.test;given_name==X", "a@b.test,c@d.test", "a b@c.test", ""):
         assert client.find_by_email(WorkflowTrace("t", "test"), bad) == []
+
+
+def test_only_leads_from_the_start_date_go_to_keap_unless_existing_leads_are_wanted(env):
+    # 2026-10-14: switching sync on would have pushed every old demo lead at once. Old leads join
+    # only when the clinic asks for them (keap_include_existing_leads).
+    old = env.lead("Old Lead", email="old@example.test", phone="+15555550111")
+    new = env.lead("New Lead", email="new@example.test", phone="+15555550112")
+    env.db.execute("update leads set created_at=now()-interval '10 days' where id=%s", (old,))
+    env.plan()
+    assert env.row(old) is None
+    assert env.row(new) is not None
+    env.db.execute("update practice_settings set keap_include_existing_leads=true where practice_id=%s",
+                   (env.practice_id,))
+    env.plan()
+    assert env.row(old) is not None

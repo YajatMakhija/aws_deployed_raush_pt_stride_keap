@@ -56,7 +56,7 @@ class Built:
 def load_settings(conn, practice_id: int) -> dict[str, Any]:
     row = conn.execute(
         "select keap_pending_tag_id,keap_gave_up_tag_id,keap_contact_type,keap_sync_start_at,"
-        "keap_include_existing_patients,keap_remove_pending_when_booked,"
+        "keap_include_existing_patients,keap_include_existing_leads,keap_remove_pending_when_booked,"
         "keap_remove_booked_on_cancel,stride_location_timezone from practice_settings "
         "where practice_id=%s",
         (practice_id,),
@@ -355,11 +355,15 @@ def attach_people(conn, practice_id: int) -> dict[str, int]:
     include_tests = get_settings().keap_include_test_leads
     counts = {"leads_added": 0, "patients_added": 0, "merged": 0, "duplicates": 0}
 
+    # Leads created before keap_sync_start_at join only if the clinic wants its existing leads in
+    # Keap (keap_include_existing_leads); a lead that already has a row is never dropped.
     counts["leads_added"] = conn.execute(
         "insert into keap_sync(practice_id,lead_id) select l.practice_id,l.id from leads l "
         "where l.practice_id=%s and (not l.is_test or %s) "
+        "and (%s or %s::timestamptz is null or l.created_at>=%s::timestamptz) "
         "and not exists(select 1 from keap_sync k where k.lead_id=l.id)",
-        (practice_id, include_tests),
+        (practice_id, include_tests, bool(settings.get("keap_include_existing_leads")),
+         settings.get("keap_sync_start_at"), settings.get("keap_sync_start_at")),
     ).rowcount
 
     # A linked patient belongs to its lead's row; never two Keap contacts for one person.
