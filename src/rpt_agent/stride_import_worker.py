@@ -208,7 +208,17 @@ def replan_keap_since(started_at) -> None:
         logging.getLogger(__name__).warning("keap_replan_failed", extra={"event": "keap_replan_failed"})
 
 
-def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
+def _add_lead_counts(counts: dict[str, int], reconciled: dict[str, int]) -> None:
+    # Reconcile runs after every file and once more at the end of the tick. Links, bookings and
+    # flags happen once, so they add up; 'ambiguous' is how many are unresolved right now.
+    for key, value in reconciled.items():
+        name = f"leads_{key}"
+        counts[name] = value if key == "ambiguous" else counts.get(name, 0) + value
+
+
+def process_file(
+    path: Path, settings: Settings, trace: WorkflowTrace, counts: dict[str, int] | None = None
+) -> str:
     try:
         size = path.stat().st_size
     except FileNotFoundError:
@@ -264,6 +274,10 @@ def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
                 )
             if result.unclear_delete_patients:
                 flag_unclear_deletes(conn, practice["id"], result.unclear_delete_patients)
+            # Link new patients to their leads in the same commit: an unlinked patient seen by
+            # the Keap planner got its own Keap contact, a duplicate of the lead's, and both
+            # rows froze in needs_review with no tags (demo, 2026-10-14).
+            linked = reconcile_leads(conn, practice["id"])
             conn.execute(
                 "update stride_import_files set status='processed',row_count=%s,applied_count=%s,"
                 "unchanged_count=%s,issue_count=%s,issues=%s,error=null,processed_at=now() where id=%s",
@@ -292,6 +306,8 @@ def process_file(path: Path, settings: Settings, trace: WorkflowTrace) -> str:
             _move(path, settings.stride_error_dir)
             return "failed"
         return "retry"
+    if counts is not None:
+        _add_lead_counts(counts, linked)
     replan_keap_since(started_at)
     trace.log(
         "stride_file_processed",
@@ -315,7 +331,7 @@ def run_stride_import_tick(now: float | None = None) -> dict[str, int]:
     trace = WorkflowTrace("stride_import_tick", SERVICE, uuid4().hex)
     write_heartbeat(settings)
     for path in ready_files(settings, now):
-        outcome = process_file(path, settings, trace)
+        outcome = process_file(path, settings, trace, counts)
         counts[outcome] = counts.get(outcome, 0) + 1
         if outcome in {"retry", "locked"}:
             # Strict order: later exports wait until this one lands or is parked.
@@ -324,8 +340,7 @@ def run_stride_import_tick(now: float | None = None) -> dict[str, int]:
     with transaction() as conn:
         if conn.execute(LOCK_SQL).fetchone()["locked"]:
             reconciled_at = conn.execute("select now() as t").fetchone()["t"]
-            for key, value in reconcile_leads(conn, _practice(conn, settings)["id"]).items():
-                counts[f"leads_{key}"] = value
+            _add_lead_counts(counts, reconcile_leads(conn, _practice(conn, settings)["id"]))
     replan_keap_since(reconciled_at)
     write_heartbeat(settings, last_tick=counts)
     trace.complete(**counts)

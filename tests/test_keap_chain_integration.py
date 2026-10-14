@@ -649,6 +649,37 @@ def test_a_one_word_sheet_name_still_links_to_its_stride_patient(chain):
     assert chain.tags(chain.contact(lead)) == {IE_BOOKED}
 
 
+def test_a_keap_tick_between_stride_files_never_makes_a_second_contact(chain, monkeypatch):
+    # Patients were linked to leads only after every file of a tick: a Keap tick in that gap saw
+    # an unlinked patient, made it a second contact, and both rows froze in needs_review with no
+    # booked tag (demo, 2026-10-14). A one-word Sheet name is what made the second contact: Stride's
+    # first + last name did not match the lead's contact in Keap.
+    email = f"racer.{chain.run}@example.test"
+    response = chain.sheet(full_name=f"Racer{chain.run}", date_of_birth="15/03/1990",
+                           phone="+15555550399", location="Laguna Niguel", title="Chain test",
+                           email=email)
+    assert response.status_code in (200, 201), response.text
+    lead = response.json()["lead_id"]
+    chain.lead_ids.append(lead)
+    chain.keap_tick()
+    pid = chain.stride_patient(f"Racer{chain.run}", "Surname", email=email)
+    chain.stride_appt(pid, 3)
+    after_each_file = stride_worker.replan_keap_since
+
+    def keap_runs_between_files(started_at):
+        after_each_file(started_at)
+        chain.keap_tick()
+
+    monkeypatch.setattr(stride_worker, "replan_keap_since", keap_runs_between_files)
+    chain.stride_tick()
+    chain.keap_tick()
+    rows = chain.db.execute("select status from keap_sync where practice_id=%s",
+                            (chain.practice,)).fetchall()
+    assert [r["status"] for r in rows] == ["synced"]
+    assert chain.tags(chain.contact(lead)) == {IE_BOOKED}
+    chain.agree(lead)
+
+
 # ============================ ordering and repetition ==============================
 
 
