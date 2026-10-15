@@ -2093,3 +2093,19 @@ known follow-up. Do not include secrets or patient/tester identifiers.
   50 polls of ≤0.27 s; 100 profile edits synced; archive verified. Live Google timing (from India, our
   code, 10,000 rows × 17 columns in a temporary tab): full read 1.2 s, narrow scan 1.4 s, load 50 rows
   0.4 s, write 100 cells 0.9 s, archive 1,000 scattered rows 6 s (one atomic request).
+
+### 2026-10-15 — Sheet is the only entry point; Lead Status mirrors the dashboard; case-aware "Already booked"
+- "Already booked" now needs the same case too (client): same phone + name + DOB + case → `Already booked`
+  (no call); a different case (booked for Ortho, referred again for Pelvic) starts a new lead and cadence.
+  Cases match by meaning via `case_types` names/aliases (`_case_key`, the booking engine's rule without the
+  default fallback): "Ortho" = "Orthopedic" = "Physical Therapy"; an unknown case ("Knee") counts as
+  different, so the patient is reached rather than skipped. Keap keeps Booked while the earlier visit is
+  upcoming (client confirmed the "upcoming booking wins" rule).
+- Lead Status in the Sheet mirrors the dashboard column (`services/lead_stage.py`, shared with the board):
+  New / In cadence / Paused / Needs Review / Booked / Do not outreach / Closed; every snapshot carries it,
+  so a resolved review no longer leaves "Needs Review" behind. Trigger `leads_sheet_stage_change`
+  (migration 045) queues a Sheet update on any status / cadence_state / needs_review change of a Sheet
+  lead, so dashboard pause/resume, board moves and review resolves reach the Sheet.
+- Dashboard "Add lead" removed (frontend) and `POST /api/v1/dashboard/leads` returns 403 unless
+  `DASHBOARD_LEAD_CREATE_ENABLED=true`: the Google Sheet is the only way leads come in.
+- Snapshot DNC label is now "Do Not Contact applied", the same words as the Sheet command's own result.

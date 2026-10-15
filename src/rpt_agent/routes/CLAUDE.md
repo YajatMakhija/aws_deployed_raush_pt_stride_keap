@@ -21,7 +21,8 @@ The staff assistant router (`/api/v1/dashboard/assistant`) lives in `../agent/ro
 
 ## dashboard.py essentials (~1800 lines)
 
-- `_stage(row)` decides the board column (new / cadence / attention / booked / closed). Order of checks
+- `POST /leads` (Add lead) is off unless `DASHBOARD_LEAD_CREATE_ENABLED=true`: leads come only from the Google Sheet (client, 2026-10-15).
+- `_stage(row)` (from `services/lead_stage.py`) decides the board column (new / cadence / attention / booked / closed). Order of checks
   matters: booked → attention → closed statuses → new/pending → paused stays `cadence` → spent cadence = closed.
 - `_lead(row)` shapes a lead for the board; `GET /snapshot` returns all leads + metrics; `GET /leads/{id}`
   returns detail with events, calls, messages, appointments, history and the `activity` feed.

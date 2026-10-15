@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Jsonb
 
 from ..config import Settings, get_settings
+from .lead_stage import sheet_lead_status
 
 CALL_OUTCOME_LABELS = {
     "booked": "Booked",
@@ -82,7 +83,7 @@ def _action_label(lead: dict[str, Any]) -> str | None:
     if lead["status"] == "booked":
         return "Booked"
     if lead["status"] == "do_not_contact":
-        return "Do not contact applied"
+        return "Do Not Contact applied"  # same words as the Sheet command's own result
     if _stride_problem(lead):
         # The n8n intake skips rows whose Outcome Status starts with "Needs review".
         return f"Needs review: {lead['review_reason']}"
@@ -188,7 +189,11 @@ def build_sheet_snapshot(
     """Build the current Sheet view from committed database truth."""
     lead = conn.execute(
         "select l.id,l.status,l.cadence_state,l.needs_review,l.review_reason,l.callback_requested_at,"
-        "coalesce(l.timezone,p.timezone,'America/Los_Angeles') as timezone "
+        "coalesce(l.timezone,p.timezone,'America/Los_Angeles') as timezone,"
+        # For the board column (Lead Status): is the cadence spent?
+        "(select count(*) from outreach_events t where t.lead_id=l.id) as cadence_total,"
+        "(select oe.id from outreach_events oe where oe.lead_id=l.id "
+        "and oe.status in ('planned','in_flight','attempted') limit 1) as next_event_id "
         "from leads l join practices p on p.id=l.practice_id where l.id=%s "
         "and (%s::text is null or p.slug=%s::text)",
         (lead_id, practice_slug, practice_slug),
@@ -287,6 +292,9 @@ def build_sheet_snapshot(
             sheet["action"] = action
     if action_status is not None:
         sheet["action_status"] = action_status
+    # Lead Status always mirrors the dashboard column (client decision 2026-10-15), so a pause, a
+    # resolved review or a board move shows in the Sheet too, and "Needs Review" never sticks.
+    sheet["lead_status"] = sheet_lead_status(lead)
     # Booked ends the lead however it happened (board, Sheet or call), so the
     # Action cell must stop showing the last command staff picked - "Restart
     # cadence" next to "Booked" reads as a pending instruction. Other states

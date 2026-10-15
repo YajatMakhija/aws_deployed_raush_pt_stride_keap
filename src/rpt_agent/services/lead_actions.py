@@ -139,18 +139,41 @@ def _update_lead_profile(conn, lead_id: str | UUID, lead_data: dict[str, Any]) -
     )
 
 
+def _case_key(conn, practice_id: int, text: Any) -> str:
+    """What a Sheet Case means: the case type it names (by name or alias, else a unique partial
+    match, as the booking engine reads it), else the text itself. No default fallback here: an
+    unknown case ("Knee") is a different case from "Ortho", so the patient is called, not skipped.
+    """
+    wanted = " ".join(str(text or "").lower().split())
+    if not wanted:
+        return ""
+    found = conn.execute(
+        "select id from (select ct.id,case "
+        " when lower(ct.name)=%(w)s or %(w)s=any(select lower(a) from unnest(ct.aliases) a) then 0 "
+        " when strpos(lower(ct.name),%(w)s)>0 and (select count(*) from case_types o "
+        "  where o.practice_id=ct.practice_id and o.is_active and strpos(lower(o.name),%(w)s)>0)=1 "
+        " then 1 end as rank from case_types ct where ct.practice_id=%(p)s and ct.is_active) ranked "
+        "where rank is not null order by rank limit 1",
+        {"w": wanted, "p": practice_id},
+    ).fetchone()
+    return f"case:{found['id']}" if found else f"text:{wanted}"
+
+
 def _same_person_already_booked(conn, practice_id: int, phone: str, lead_data: dict[str, Any]):
-    """The same patient (phone + name + birthday) who is already booked must not be called again.
+    """The same patient (phone + name + birthday) already booked for the SAME case is not called again.
 
     A repeat patient referred for another body region shares the number but is a new referral, and
     starts a new lead (hand_over_number). Only an exact repeat of a booked person is refused: seen in
     testing, a booked patient added to the Sheet again got a fresh cadence and was called.
     "Booked" means a visit still ahead (ours or Stride's), or a booking made in the last 30 days when
     no visit is on record (staff picked Booked in the Sheet).
+    The case must match too (client, 2026-10-15): a patient booked for Ortho who comes back for
+    Pelvic must be reached. Cases match by meaning ("Ortho" = "Physical Therapy" via aliases).
     """
     name = " ".join(str(lead_data.get("full_name") or "").lower().split())
-    return conn.execute(
-        "select l.id from leads l where l.practice_id=%s and l.phone_e164=%s and l.status='booked' "
+    booked = conn.execute(
+        "select l.id,l.lead_type from leads l where l.practice_id=%s and l.phone_e164=%s "
+        "and l.status='booked' "
         "and lower(regexp_replace(trim(l.full_name),'\\s+',' ','g'))=%s "
         "and (l.date_of_birth is null or %s::date is null or l.date_of_birth=%s::date) "
         "and (exists(select 1 from appointments a where a.lead_id=l.id and a.start_utc>now() "
@@ -160,9 +183,16 @@ def _same_person_already_booked(conn, practice_id: int, phone: str, lead_data: d
         "  and lower(coalesce(s.status,'')) not in ('cancel','cancelled','late cancel','no show','a','l','n') "
         "  where p.lead_id=l.id) "
         " or coalesce(l.status_changed_at,l.updated_at)>now()-interval '30 days') "
-        "order by l.status_changed_at desc limit 1",
+        "order by l.status_changed_at desc",
         (practice_id, phone, name, lead_data.get("date_of_birth"), lead_data.get("date_of_birth")),
-    ).fetchone()
+    ).fetchall()
+    if not booked:
+        return None
+    wanted = _case_key(conn, practice_id, lead_data.get("lead_type") or lead_data.get("title"))
+    for lead in booked:
+        if _case_key(conn, practice_id, lead["lead_type"]) == wanted:
+            return lead
+    return None
 
 
 def _start_cadence(

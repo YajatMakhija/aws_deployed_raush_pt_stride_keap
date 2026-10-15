@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     assistant_phi_approved: bool = False
     assistant_phi_approval_reference: str = ""
     dashboard_public_url: str = ""
+    # The Google Sheet is the only way leads come in (client, 2026-10-15): the dashboard's "Add
+    # lead" is switched off unless this is turned on (local tests, emergencies).
+    dashboard_lead_create_enabled: bool = False
     n8n_intake_key_id: str = ""
     n8n_intake_secret: str = ""
     n8n_intake_auth_disabled: bool = False

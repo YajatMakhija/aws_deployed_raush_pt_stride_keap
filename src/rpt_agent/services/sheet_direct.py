@@ -600,6 +600,8 @@ def apply_snapshot(grid: SheetGrid, snapshot: dict[str, Any]) -> bool:
 
 def _lead_status(row: SheetRow, sheet: dict[str, Any]) -> str:
     explicit = str(sheet.get("lead_status") or "").strip()
+    if explicit:
+        return explicit  # the backend sends the board column (lead_stage.sheet_lead_status)
     ex = explicit.lower()
     review = str(sheet.get("needs_review") or "").strip().lower()
     outcome = row.get("outcome_status").lower()

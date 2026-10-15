@@ -470,7 +470,7 @@ def test_sheet_result_marks_missing_sms_callback_for_review():
 def test_sheet_action_status_only_for_system_outcomes():
     assert _action_label({"status": "in_progress", "cadence_state": "active"}) is None
     assert _action_label({"status": "do_not_contact", "cadence_state": "terminated"}) == (
-        "Do not contact applied"
+        "Do Not Contact applied"
     )
     assert _action_label({"status": "closed_no_response", "cadence_state": "completed"}) == (
         "Cadence completed"
@@ -1275,3 +1275,24 @@ def test_n8n_intake_processes_each_supported_action_once_without_update_loops():
         "Validate and Build Intake"
     )
     assert workflow["connections"][guard_name]["main"][1] == []
+
+
+def test_every_snapshot_carries_lead_status_as_the_board_column():
+    # Client, 2026-10-15: Lead Status mirrors the dashboard, so Needs Review never sticks.
+    review = build_sheet_snapshot(_SnapshotConnection(), "00000000-0000-0000-0000-000000000002")
+    assert review["sheet"]["lead_status"] == "Needs Review"
+    booked = build_sheet_snapshot(_BookedSnapshotConnection(), "00000000-0000-0000-0000-000000000002")
+    assert booked["sheet"]["lead_status"] == "Booked"
+
+    class Paused(_SnapshotConnection):
+        def execute(self, query, params=None):
+            if "a.patient_dob" in query:  # the birthday check on a lead not flagged for review
+                return _Rows(one=None)
+            rows = super().execute(query, params)
+            if query.startswith("select l.id,l.status"):
+                rows.one = {**rows.one, "status": "in_progress", "cadence_state": "paused",
+                            "needs_review": False, "cadence_total": 4, "next_event_id": None}
+            return rows
+
+    paused = build_sheet_snapshot(Paused(), "00000000-0000-0000-0000-000000000002")
+    assert paused["sheet"]["lead_status"] == "Paused"

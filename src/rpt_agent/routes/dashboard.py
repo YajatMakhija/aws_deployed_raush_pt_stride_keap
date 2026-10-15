@@ -16,6 +16,7 @@ from ..parsing import parse_flexible_date
 from ..security import DashboardActor, require_dashboard_auth
 from ..services import appointment_views
 from ..services.keap_sync_status import keap_sync_status
+from ..services.lead_stage import stage_of as _stage
 from ..services.number_block import NumberBlockError, block_number, unblock_number
 from ..services.provider_http import ProviderError
 from ..services.review import (
@@ -176,39 +177,6 @@ class LeadCreate(BaseModel):
         if value > datetime.now(UTC).date():
             raise ValueError("date_of_birth cannot be in the future")
         return value
-
-
-CLOSED_STATUSES = frozenset(
-    {
-        "declined",
-        "do_not_contact",
-        "closed_no_response",
-        "invalid_phone",
-    }
-)
-
-
-def _stage(row: dict) -> str:
-    """Bucket a lead for the board. 'cadence' means outreach is still running."""
-    if row["status"] == "booked":
-        return "booked"
-    if row["needs_review"] or row["status"] == "needs_attention":
-        return "attention"
-    # A finished lead is not in cadence. Without this it falls through below and
-    # a declined patient keeps showing as actively worked.
-    if row["status"] in CLOSED_STATUSES or row["cadence_state"] in {"completed", "terminated"}:
-        return "closed"
-    if row["status"] == "new" or row["cadence_state"] == "pending":
-        return "new"
-    # Pausing skips the remaining steps until resume, so a paused lead has no
-    # next event either. That is on hold, not spent.
-    if row["cadence_state"] == "paused":
-        return "cadence"
-    # Every step has run and nothing is awaiting a provider result, so the
-    # cadence is spent even though the lead was never explicitly closed.
-    if row.get("cadence_total") and not row.get("next_event_id"):
-        return "closed"
-    return "cadence"
 
 
 CLOSED_REASON = {
@@ -690,6 +658,11 @@ def dashboard_keap_sync(actor: Actor):
 
 @router.post("/leads", status_code=201)
 def create_dashboard_lead(payload: LeadCreate, actor: Actor):
+    if not get_settings().dashboard_lead_create_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="New leads come from the Google Sheet; adding them in the dashboard is switched off",
+        )
     phone = format_phone(payload.phone)
     if not phone:
         raise HTTPException(status_code=422, detail="phone must be a valid E.164 or US number")

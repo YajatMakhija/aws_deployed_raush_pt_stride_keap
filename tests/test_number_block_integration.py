@@ -126,7 +126,8 @@ def _events(db, lead_id):
 
 def _snapshot(db, lead_id):
     reasons = [r["payload"]["reason"] for r in db["conn"].execute(
-        "select payload from integration_outbox where aggregate_id=%s order by id", (lead_id,))]
+        "select payload from integration_outbox where aggregate_id=%s "
+        "and event_type<>'sheet.stage_changed' order by id", (lead_id,))]  # trigger rows: migration 045
     return reasons, build_sheet_snapshot(db["conn"], lead_id, reasons=reasons)["sheet"]
 
 
@@ -144,7 +145,7 @@ def test_dashboard_block_matches_the_sheet_command(db):
     assert {e["status"] for e in _events(db, lead)} == {"skipped"}
     reasons, sheet = _snapshot(db, lead)
     assert reasons == ["dashboard_do_not_contact"]
-    assert sheet["action_status"] == "Do not contact applied"
+    assert sheet["action_status"] == "Do Not Contact applied"
 
 
 def test_continue_resumes_only_the_stopped_steps_with_their_spacing(db):
@@ -254,7 +255,7 @@ def test_older_do_not_contact_rows_are_marked_unblocked_too(db):
     assert "number_unblocked" in reasons
     # The old lead keeps its own Do Not Contact status, so its Sheet row keeps
     # saying so; the intake workflow skips it until staff change the Action.
-    assert sheet["action_status"] == "Do not contact applied"
+    assert sheet["action_status"] == "Do Not Contact applied"
     assert "action" not in sheet
 
 

@@ -368,6 +368,7 @@ def test_dashboard_snapshot_uses_authenticated_actor(monkeypatch):
 
 def test_second_lead_on_the_same_phone_number_is_allowed_with_a_warning(monkeypatch):
     monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    monkeypatch.setenv("DASHBOARD_LEAD_CREATE_ENABLED", "true")
     get_settings.cache_clear()
     connection = CreateLeadConnection(existing_phone_owner="Rudraksh Mehta")
 
@@ -407,6 +408,7 @@ def test_second_lead_on_the_same_phone_number_is_allowed_with_a_warning(monkeypa
 @pytest.mark.parametrize("user_id,role", [("admin", "super_admin"), ("employee1", "employee"), ("employee2", "employee")])
 def test_dashboard_create_lead_persists_and_materializes(monkeypatch, user_id, role):
     monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    monkeypatch.setenv("DASHBOARD_LEAD_CREATE_ENABLED", "true")
     monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.setenv("TEST_MODE", "true")
     get_settings.cache_clear()
@@ -1545,3 +1547,23 @@ def test_paused_lead_stays_in_cadence_not_closed():
     assert dashboard_routes._stage(row) == "cadence"
     assert dashboard_routes._stage({**row, "cadence_state": "active"}) == "closed"
     assert dashboard_routes._stage({**row, "status": "invalid_phone"}) == "closed"
+
+
+def test_adding_a_lead_in_the_dashboard_is_off_by_default(monkeypatch):
+    # Client, 2026-10-15: the Google Sheet is the only way leads come in.
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    monkeypatch.delenv("DASHBOARD_LEAD_CREATE_ENABLED", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(dashboard_routes, "transaction", lambda: (_ for _ in ()).throw(
+        AssertionError("no database work when adding is switched off")))
+    response = TestClient(app).post(
+        "/api/v1/dashboard/leads",
+        headers={"X-Dashboard-Token": "x" * 32, "X-Dashboard-User-ID": "admin",
+                 "X-Dashboard-User-Name": "Admin", "X-Dashboard-User-Role": "super_admin"},
+        json={"idempotency_key": "k" * 12, "first_name": "Asha", "last_name": "Rao",
+              "phone": "5555550101", "date_of_birth": "1990-01-16", "lead_type": "Ortho",
+              "location": "Dana Point", "contact_consent": True},
+    )
+    assert response.status_code == 403
+    assert "Google Sheet" in response.json()["detail"]
+    get_settings.cache_clear()

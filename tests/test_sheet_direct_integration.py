@@ -475,3 +475,89 @@ def test_the_archive_runs_once_in_its_hour_and_only_when_enabled(env, monkeypatc
     at["now"] = at["now"].replace(hour=4)
     sheet_sync_worker._direct_state["archived_on"] = None
     assert not sheet_sync_worker._archive_due(settings)  # outside the hour
+
+
+# --- Lead Status mirrors the dashboard (2026-10-15) --------------------------------------------
+
+
+def test_pause_resume_and_review_show_in_the_sheets_lead_status(env):
+    number = env.start_row()
+    env.tick()
+    lead_id = env.cell(number, "lead_id")
+    assert env.cell(number, "lead_status") == "In cadence"
+    env.db.execute("update leads set cadence_state='paused' where id=%s", (lead_id,))  # dashboard pause
+    env.tick(full=False)
+    assert env.cell(number, "lead_status") == "Paused"
+    env.db.execute("update leads set cadence_state='active' where id=%s", (lead_id,))  # resume
+    env.tick(full=False)
+    assert env.cell(number, "lead_status") == "In cadence"
+    env.db.execute("update leads set needs_review=true,status='needs_attention' where id=%s", (lead_id,))
+    env.tick(full=False)
+    assert env.cell(number, "lead_status") == "Needs Review"
+    env.db.execute("update leads set needs_review=false,status='in_progress' where id=%s", (lead_id,))
+    env.tick(full=False)
+    assert env.cell(number, "lead_status") == "In cadence"  # a resolved review no longer sticks
+
+
+def test_the_stage_trigger_only_queues_sheet_leads_and_only_on_real_changes(env):
+    number = env.start_row()
+    env.tick()
+    lead_id = env.cell(number, "lead_id")
+
+    def queued():
+        return env.db.execute("select count(*) n from integration_outbox where aggregate_id=%s "
+                              "and event_type='sheet.stage_changed'", (lead_id,)).fetchone()["n"]
+
+    before = queued()
+    env.db.execute("update leads set email='x@example.test' where id=%s", (lead_id,))
+    env.db.execute("update leads set cadence_state=cadence_state where id=%s", (lead_id,))
+    assert queued() == before  # no stage change, nothing queued
+    env.db.execute("update leads set cadence_state='paused' where id=%s", (lead_id,))
+    assert queued() == before + 1
+    env.db.execute("update leads set source_system='dashboard' where id=%s", (lead_id,))
+    env.db.execute("update leads set cadence_state='active' where id=%s", (lead_id,))
+    assert queued() == before + 1  # dashboard leads are not in the Sheet
+
+
+# --- "Already booked" needs the same case (2026-10-15) -----------------------------------------
+
+
+@pytest.fixture
+def cases(env):
+    for name, aliases, default in (("Physical Therapy", ["ortho", "orthopedic"], True),
+                                   ("Physical Therapy - Pelvic", ["pelvic", "pelvic floor"], False)):
+        env.db.execute("insert into case_types(practice_id,name,stride_appointment_type_id,"
+                       "duration_minutes,is_default,aliases) values(%s,%s,1452,60,%s,%s)",
+                       (env.practice_id, name, default, aliases))
+    yield
+    env.db.execute("delete from case_types where practice_id=%s", (env.practice_id,))
+
+
+def _booked(env, **cells):
+    number = env.start_row(**cells)
+    env.tick()
+    env.db.execute("update leads set status='booked',cadence_state='completed',"
+                   "status_changed_at=now() where id=%s", (env.cell(number, "lead_id"),))
+    return number
+
+
+@pytest.mark.parametrize(("first", "again", "expected"), [
+    ("Ortho", "Ortho", "Already booked"),
+    ("Ortho", "orthopedic", "Already booked"),            # same case, another name for it
+    ("Ortho", "Physical Therapy", "Already booked"),
+    ("Pelvic", "Pelvic Floor", "Already booked"),
+    ("Ortho", "Pelvic", "Cadence started"),               # different case: call them
+    ("Pelvic", "Ortho", "Cadence started"),
+    ("Ortho", "Knee", "Cadence started"),                 # unknown case: reach out, don't skip
+])
+def test_a_booked_patient_is_skipped_only_for_the_same_case(env, cases, first, again, expected):
+    phone = _phone()
+    _booked(env, phone=phone, case=first)
+    number = env.start_row(phone=phone, case=again)
+    env.tick()
+    assert env.cell(number, "outcome_status") == expected
+    leads = env.leads()
+    assert len(leads) == (1 if expected == "Already booked" else 2)
+    if expected == "Cadence started":
+        assert leads[-1]["status"] == "in_progress" and leads[-1]["lead_type"] == again
+        assert env.lead(leads[0]["id"])["status"] == "booked"  # the first booking is untouched

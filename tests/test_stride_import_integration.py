@@ -502,7 +502,8 @@ def test_sheet_lead_who_books_alone_is_marked_booked_and_cadence_stops(env):
         "booked", "completed", 101, 7001)
     assert env.one("select count(*) n from outreach_events where lead_id=%s and status='planned'", lead)["n"] == 0
     assert env.one("select source from lead_status_history where lead_id=%s", lead)["source"] == "stride"
-    assert env.one("select event_type from integration_outbox where aggregate_id=%s",
+    assert env.one("select event_type from integration_outbox where aggregate_id=%s "
+                   "and event_type<>'sheet.stage_changed'",  # trigger rows: migration 045
                    str(lead))["event_type"] == "sheet.lead_booked"
     assert env.tick().get("leads_booked") == 0  # recomputed, never repeated
 
@@ -598,7 +599,8 @@ def test_flagged_lead_that_rebooks_is_booked_again(env):
     env.tick()
     row = env.one("select status,needs_review from leads where id=%s", lead)
     assert (row["status"], row["needs_review"]) == ("booked", False)
-    events = env.db.execute("select event_type from integration_outbox where aggregate_id=%s order by id",
+    events = env.db.execute("select event_type from integration_outbox where aggregate_id=%s "
+                            "and event_type<>'sheet.stage_changed' order by id",  # migration 045
                             (str(lead),)).fetchall()
     assert [e["event_type"] for e in events] == [
         "sheet.lead_booked", "sheet.stride_booking_cancelled", "sheet.lead_booked"]
