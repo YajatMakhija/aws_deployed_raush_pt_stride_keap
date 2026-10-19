@@ -2109,3 +2109,10 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - Dashboard "Add lead" removed (frontend) and `POST /api/v1/dashboard/leads` returns 403 unless
   `DASHBOARD_LEAD_CREATE_ENABLED=true`: the Google Sheet is the only way leads come in.
 - Snapshot DNC label is now "Do Not Contact applied", the same words as the Sheet command's own result.
+
+### 2026-10-19 — Demo moves to its own EC2 (`demo.aibolt.ai`)
+- `stride.aibolt.ai` is production (cadence-only repo) now; the demo gets a new EC2 `stride-demo` (us-east-1,
+  t3.small, 16 GiB) and the host `demo.aibolt.ai`. Caddyfile site name changed to match.
+- `scripts/make-demo-env.sh` builds the server `.env` from the old demo settings on the server itself (no secret
+  leaves the box). It turns Sheet, Stride import and Keap sync off for the first start: the old settings still
+  carry the clinic number, which production owns. Only `api` + `caddy` run until the demo has test numbers.

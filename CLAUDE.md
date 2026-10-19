@@ -47,7 +47,7 @@ CLI: `rpt migrate | verify | seed | demo | test-lead | agent | sheet-check` (`cl
 ```
 
 Local Docker stack: `scripts/dev.sh start` (mock providers via the Compose `mock` profile).
-Production: `docker-compose.prod.yml` behind Caddy (`Caddyfile`, domain `stride.aibolt.ai`). See
+Production: `docker-compose.prod.yml` behind Caddy (`Caddyfile`, domain `demo.aibolt.ai`, demo EC2). See
 `../Deployment.md`.
 
 ## Core concepts (read before editing logic)
