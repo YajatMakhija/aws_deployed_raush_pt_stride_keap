@@ -1,4 +1,5 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -162,6 +163,33 @@ def test_compressed_cadence_uses_exact_day_offsets(monkeypatch):
     assert connection.inserted == sorted(connection.inserted)
     assert connection.inserted[1] == connection.inserted[0]
     assert (connection.inserted[2] - connection.inserted[0]).total_seconds() == 60
+
+
+PROD_STEPS = [
+    {"id": i, "step_order": i, "day_offset": day, "channel": channel}
+    for i, (day, channel) in enumerate([(0, "call"), (0, "sms"), (1, "sms"), (3, "call"), (5, "call"),
+                                        (5, "sms"), (9, "sms"), (13, "sms"), (14, "call")])
+]
+
+
+@pytest.mark.parametrize("start_on", [date(2026, 10, 19) + timedelta(days=n) for n in range(7)])
+def test_real_cadence_keeps_its_order_and_one_business_day_per_cadence_day(monkeypatch, start_on):
+    """2026-10-19 simulation: a lead started on a Sunday had Day 0 and Day 1 both moved to Monday, and
+    the Day 1 reminder went out before the Day 0 call (Day 14 before Day 13 likewise). Each cadence day
+    now gets its own business day, in cadence order, on every weekday a lead can start."""
+    monkeypatch.setattr("rpt_agent.worker.get_settings", lambda: Settings(test_mode=False))
+    connection = _CadenceConnection(is_test=False, steps=PROD_STEPS)
+    materialize_cadence(connection, f"lead-{start_on}", 1, start_on)
+    times = connection.inserted
+    assert times == sorted(times)
+    local = [t.astimezone(ZoneInfo("America/Los_Angeles")) for t in times]
+    assert all(t.weekday() < 5 and 9 <= t.hour < 17 for t in local)
+    day_dates = {}
+    for step, t in zip(PROD_STEPS, local, strict=True):
+        day_dates.setdefault(step["day_offset"], set()).add(t.date())
+    assert all(len(dates) == 1 for dates in day_dates.values())  # a cadence day stays on one date
+    ordered = [min(day_dates[d]) for d in sorted(day_dates)]
+    assert ordered == sorted(set(ordered))  # distinct dates, strictly increasing
 
 
 def test_worker_claims_only_one_due_event_per_lead():

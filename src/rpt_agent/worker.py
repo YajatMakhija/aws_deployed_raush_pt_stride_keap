@@ -186,17 +186,25 @@ def materialize_cadence(
     seen_on_day: dict[int, int] = {}
     base_by_day: dict[int, datetime] = {}
     previous: datetime | None = None
+    clinic_tz = ZoneInfo(settings["timezone"] or "America/Los_Angeles")
+    previous_day_date: date | None = None
     for step in steps:
         position = seen_on_day.get(step["day_offset"], 0)
         seen_on_day[step["day_offset"]] = position + 1
         gap = timedelta(minutes=0 if accelerated else STEP_GAP_MINUTES * position)
         if step["day_offset"] not in base_by_day:
-            base_by_day[step["day_offset"]] = (
-                anchor
-                + timedelta(minutes=step["day_offset"] * app_settings.test_cadence_day_minutes)
-                if accelerated
-                else compute_send_time(settings, lead_id, start_on, step["day_offset"])
-            )
+            if accelerated:
+                base = anchor + timedelta(minutes=step["day_offset"] * app_settings.test_cadence_day_minutes)
+            else:
+                base = compute_send_time(settings, lead_id, start_on, step["day_offset"])
+                # A weekend or holiday moves a day to the next open day, which can be the date
+                # the next cadence day already has (a Sunday lead: Day 0 and Day 1 both on
+                # Monday, so the Day 1 reminder went out before the Day 0 call). Each cadence
+                # day gets its own business day, in order.
+                if previous_day_date and base.astimezone(clinic_tz).date() <= previous_day_date:
+                    base = compute_send_time(settings, lead_id, previous_day_date, 1)
+                previous_day_date = base.astimezone(clinic_tz).date()
+            base_by_day[step["day_offset"]] = base
         scheduled_for = base_by_day[step["day_offset"]] + gap
         if accelerated and previous and scheduled_for < previous:
             scheduled_for = previous
