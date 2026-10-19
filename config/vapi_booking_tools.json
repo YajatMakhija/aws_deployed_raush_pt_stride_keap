@@ -68,7 +68,7 @@
         }
       ],
       "server": {
-        "url": "https://stride.aibolt.ai/api/v1/tools/find-slots",
+        "url": "https://demo.aibolt.ai/api/v1/tools/find-slots",
         "timeoutSeconds": 20
       }
     },
@@ -136,7 +136,7 @@
         }
       ],
       "server": {
-        "url": "https://stride.aibolt.ai/api/v1/tools/book-appointment",
+        "url": "https://demo.aibolt.ai/api/v1/tools/book-appointment",
         "timeoutSeconds": 30
       }
     },
@@ -170,7 +170,7 @@
         }
       ],
       "server": {
-        "url": "https://stride.aibolt.ai/api/v1/tools/list-providers",
+        "url": "https://demo.aibolt.ai/api/v1/tools/list-providers",
         "timeoutSeconds": 15
       }
     }
