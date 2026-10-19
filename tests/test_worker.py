@@ -1,4 +1,5 @@
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime
+from datetime import time as dtime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -10,9 +11,10 @@ from rpt_agent.worker import (
     CADENCE_WORKER_LOCK_ID,
     CLAIM_SQL,
     Job,
+    cadence_day_time,
     cadence_worker_lock,
-    compute_send_time,
     dispatch_job,
+    first_contact_time,
     format_phone,
     materialize_cadence,
     render_sms_template,
@@ -27,14 +29,41 @@ def test_phone_normalization():
     assert format_phone("123") is None
 
 
-def test_existing_scheduler_stays_inside_business_day():
-    settings = {
-        "timezone": "America/Los_Angeles", "holidays": [],
-        "business_hours": {str(day): {"open": "09:00", "close": "17:00"} for day in range(1, 6)},
-    }
-    result = compute_send_time(settings, "lead-1", date(2026, 8, 24), 0)
-    local = result.astimezone(__import__("zoneinfo").ZoneInfo("America/Los_Angeles"))
-    assert 9 <= local.hour <= 16
+CLINIC = ZoneInfo("America/Los_Angeles")
+HOURS = {
+    "timezone": "America/Los_Angeles", "holidays": [],
+    "business_hours": {str(day): {"open": "09:00", "close": "17:00"} for day in range(1, 6)},
+}
+
+
+def _pt(day, hour, minute=0):
+    return datetime(2026, 10, day, hour, minute, tzinfo=CLINIC)  # Oct 19 2026 is a Monday
+
+
+@pytest.mark.parametrize(("added", "first"), [
+    (_pt(19, 10, 0), _pt(19, 10, 0)),      # in hours: right away (owner, 2026-10-19)
+    (_pt(19, 16, 44), _pt(19, 16, 44)),    # still in time before closing
+    (_pt(19, 7, 30), _pt(19, 9, 0)),       # before opening: at opening
+    (_pt(19, 16, 50), _pt(20, 9, 0)),      # too close to closing: next morning
+    (_pt(19, 20, 0), _pt(20, 9, 0)),       # evening: next morning
+    (_pt(23, 18, 0), _pt(26, 9, 0)),       # Friday evening: Monday
+    (_pt(24, 11, 0), _pt(26, 9, 0)),       # Saturday: Monday
+    (_pt(25, 23, 30), _pt(26, 9, 0)),      # Sunday night: Monday
+])
+def test_first_contact_is_immediate_in_hours_else_next_opening(added, first):
+    assert first_contact_time(HOURS, added.astimezone(UTC)) == first.astimezone(UTC)
+
+
+def test_first_contact_skips_a_holiday_and_respects_a_short_day():
+    holiday = {**HOURS, "holidays": ["2026-10-20", {"date": "2026-10-21", "close": "12:00"}]}
+    assert first_contact_time(holiday, _pt(20, 10).astimezone(UTC)) == _pt(21, 9).astimezone(UTC)
+    assert first_contact_time(holiday, _pt(21, 11, 50).astimezone(UTC)) == _pt(22, 9).astimezone(UTC)
+
+
+def test_later_days_keep_the_first_contact_time_inside_hours():
+    assert cadence_day_time(HOURS, date(2026, 10, 24), _pt(19, 10, 7).timetz()) == _pt(26, 10, 7).astimezone(UTC)
+    late = {**HOURS, "holidays": [{"date": "2026-10-22", "close": "12:00"}]}
+    assert cadence_day_time(late, date(2026, 10, 22), _pt(19, 16, 40).timetz()) == _pt(22, 11, 45).astimezone(UTC)
 
 
 def test_sms_template_renders_name_and_booking_link():
@@ -172,24 +201,40 @@ PROD_STEPS = [
 ]
 
 
-@pytest.mark.parametrize("start_on", [date(2026, 10, 19) + timedelta(days=n) for n in range(7)])
-def test_real_cadence_keeps_its_order_and_one_business_day_per_cadence_day(monkeypatch, start_on):
-    """2026-10-19 simulation: a lead started on a Sunday had Day 0 and Day 1 both moved to Monday, and
-    the Day 1 reminder went out before the Day 0 call (Day 14 before Day 13 likewise). Each cadence day
-    now gets its own business day, in cadence order, on every weekday a lead can start."""
+START_TIMES = [_pt(day, hour, minute) for day in range(19, 26)
+               for hour, minute in [(6, 0), (9, 0), (10, 0), (13, 37), (16, 44), (16, 50), (20, 0)]]
+
+
+@pytest.mark.parametrize("added", START_TIMES, ids=lambda t: t.strftime("%a-%H%M"))
+def test_real_cadence_order_hours_and_first_contact(monkeypatch, added):
+    """Every weekday and time a lead can be added: steps in cadence order, each cadence day on its
+    own business day inside calling hours, and Day 0 right away when added in calling hours.
+    2026-10-19: a Sunday lead got the Day 1 reminder before the Day 0 call, and a 10 AM lead
+    waited until the afternoon for its first call."""
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return added.astimezone(tz or UTC)
+
+    monkeypatch.setattr("rpt_agent.worker.datetime", Clock)
     monkeypatch.setattr("rpt_agent.worker.get_settings", lambda: Settings(test_mode=False))
     connection = _CadenceConnection(is_test=False, steps=PROD_STEPS)
-    materialize_cadence(connection, f"lead-{start_on}", 1, start_on)
+    materialize_cadence(connection, "lead", 1, added.date())
     times = connection.inserted
     assert times == sorted(times)
-    local = [t.astimezone(ZoneInfo("America/Los_Angeles")) for t in times]
-    assert all(t.weekday() < 5 and 9 <= t.hour < 17 for t in local)
+    local = [t.astimezone(CLINIC) for t in times]
+    assert all(t.weekday() < 5 and dtime(9) <= t.time() < dtime(17) for t in local)
+    in_hours = added.weekday() < 5 and dtime(9) <= added.time() < dtime(16, 45)
+    assert (times[0] == added.astimezone(UTC)) is in_hours
     day_dates = {}
     for step, t in zip(PROD_STEPS, local, strict=True):
         day_dates.setdefault(step["day_offset"], set()).add(t.date())
-    assert all(len(dates) == 1 for dates in day_dates.values())  # a cadence day stays on one date
-    ordered = [min(day_dates[d]) for d in sorted(day_dates)]
-    assert ordered == sorted(set(ordered))  # distinct dates, strictly increasing
+    assert all(len(dates) == 1 for dates in day_dates.values())
+    ordered = [next(iter(day_dates[d])) for d in sorted(day_dates)]
+    assert ordered == sorted(set(ordered))
+    # Weekends only push days later: never sooner than the cadence says.
+    assert all((day_dates[d].pop() - local[0].date()).days >= d for d in sorted(day_dates))
 
 
 def test_worker_claims_only_one_due_event_per_lead():

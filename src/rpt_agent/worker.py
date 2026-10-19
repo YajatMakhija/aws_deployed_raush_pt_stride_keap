@@ -99,30 +99,6 @@ def format_phone(raw: str | None) -> str | None:
     return "+" + digits
 
 
-def compute_send_time(settings: dict, lead_id: str, start_on: date, day_offset: int) -> datetime:
-    """Existing cadence spreading logic, intentionally unchanged for this milestone."""
-    import random
-
-    hours = settings["business_hours"] or {}
-    holidays = _parse_holidays(settings["holidays"])
-    tz = ZoneInfo(settings["timezone"] or "America/Los_Angeles")
-    target = start_on + timedelta(days=day_offset)
-    for _ in range(21):
-        window = hours.get(str(target.isoweekday()))
-        holiday = holidays.get(target)
-        if window and holiday is not False:
-            open_t = _parse_time(window["open"])
-            close_t = _parse_time(holiday) if isinstance(holiday, str) else _parse_time(window["close"])
-            open_dt = datetime.combine(target, open_t, tzinfo=tz)
-            close_dt = datetime.combine(target, close_t, tzinfo=tz)
-            usable = max((close_dt - open_dt).total_seconds() - 1800, 0)
-            slot = (hash(str(lead_id)) % 10_000) / 10_000
-            offset = max(0, min(slot * usable + random.uniform(-120, 120), usable))
-            return (open_dt + timedelta(seconds=offset)).astimezone(UTC)
-        target += timedelta(days=1)
-    return datetime.combine(target, dtime(9, 0), tzinfo=tz).astimezone(UTC)
-
-
 def _parse_holidays(raw) -> dict:
     out = {}
     for item in raw or []:
@@ -136,6 +112,62 @@ def _parse_holidays(raw) -> dict:
 def _parse_time(value: str) -> dtime:
     hours, minutes = value.split(":")[:2]
     return dtime(int(hours), int(minutes))
+
+
+# Contact may start until this long before closing, so a Day 0 call and the text a few minutes
+# after it both land inside calling hours.
+LAST_START_BEFORE_CLOSE = timedelta(minutes=15)
+
+
+def _contact_window(settings: dict, day: date) -> tuple[datetime, datetime] | None:
+    """When contact may start on `day` (clinic time): (open, last start), or None if closed."""
+    hours = settings["business_hours"] or {}
+    holiday = _parse_holidays(settings["holidays"]).get(day)
+    window = hours.get(str(day.isoweekday()))
+    if not window or holiday is False:
+        return None
+    tz = ZoneInfo(settings["timezone"] or "America/Los_Angeles")
+    open_dt = datetime.combine(day, _parse_time(window["open"]), tzinfo=tz)
+    close_t = _parse_time(holiday) if isinstance(holiday, str) else _parse_time(window["close"])
+    last_start = datetime.combine(day, close_t, tzinfo=tz) - LAST_START_BEFORE_CLOSE
+    return (open_dt, last_start) if last_start > open_dt else None
+
+
+def first_contact_time(settings: dict, now: datetime) -> datetime:
+    """Day 0: right away inside calling hours, else when the clinic next opens.
+
+    Calls used to be spread over the whole day by a hash of the lead id, so a lead added at
+    10 AM could wait until 4:30 PM for its first call (owner, 2026-10-19: it must be minutes).
+    """
+    tz = ZoneInfo(settings["timezone"] or "America/Los_Angeles")
+    local = now.astimezone(tz)
+    day = local.date()
+    for _ in range(30):
+        window = _contact_window(settings, day)
+        if window:
+            open_dt, last_start = window
+            if local <= open_dt:
+                return open_dt.astimezone(UTC)
+            if local < last_start:
+                return local.astimezone(UTC)
+        day += timedelta(days=1)
+        local = datetime.combine(day, dtime(0, 0), tzinfo=tz)
+    return now
+
+
+def cadence_day_time(settings: dict, earliest_day: date, time_of_day: dtime) -> datetime:
+    """A later cadence day: the first open day from `earliest_day`, at the Day 0 time of day
+    (kept inside that day's calling hours)."""
+    tz = ZoneInfo(settings["timezone"] or "America/Los_Angeles")
+    day = earliest_day
+    for _ in range(30):
+        window = _contact_window(settings, day)
+        if window:
+            open_dt, last_start = window
+            wanted = datetime.combine(day, time_of_day, tzinfo=tz)
+            return min(max(wanted, open_dt), last_start).astimezone(UTC)
+        day += timedelta(days=1)
+    return datetime.combine(earliest_day, dtime(9, 0), tzinfo=tz).astimezone(UTC)
 
 
 # Minutes between two steps that fall on the same cadence day.
@@ -179,7 +211,8 @@ def materialize_cadence(
     app_settings = get_settings()
     accelerated = bool(app_settings.test_mode and lead and lead["is_test"])
     anchor = datetime.now(UTC)
-    # Production keeps the established same-day spacing. A compressed test day is
+    # Real leads: Day 0 starts right away in calling hours (or at the next opening), later
+    # days at the same time of day, steps on one day a few minutes apart. A compressed test day is
     # literal: every step on Day 0 starts at the anchor, Day 1 is one configured
     # test-day later, and so on. claim_jobs serializes each lead so equal timestamps
     # cannot make an SMS overtake an unresolved call.
@@ -188,6 +221,8 @@ def materialize_cadence(
     previous: datetime | None = None
     clinic_tz = ZoneInfo(settings["timezone"] or "America/Los_Angeles")
     previous_day_date: date | None = None
+    first_contact = first_contact_time(settings, anchor)
+    first_contact_local = first_contact.astimezone(clinic_tz)
     for step in steps:
         position = seen_on_day.get(step["day_offset"], 0)
         seen_on_day[step["day_offset"]] = position + 1
@@ -195,15 +230,16 @@ def materialize_cadence(
         if step["day_offset"] not in base_by_day:
             if accelerated:
                 base = anchor + timedelta(minutes=step["day_offset"] * app_settings.test_cadence_day_minutes)
+            elif step["day_offset"] <= 0:
+                base = first_contact
             else:
-                base = compute_send_time(settings, lead_id, start_on, step["day_offset"])
-                # A weekend or holiday moves a day to the next open day, which can be the date
-                # the next cadence day already has (a Sunday lead: Day 0 and Day 1 both on
-                # Monday, so the Day 1 reminder went out before the Day 0 call). Each cadence
-                # day gets its own business day, in order.
-                if previous_day_date and base.astimezone(clinic_tz).date() <= previous_day_date:
-                    base = compute_send_time(settings, lead_id, previous_day_date, 1)
-                previous_day_date = base.astimezone(clinic_tz).date()
+                # Each cadence day gets its own business day, in order: a weekend shift could
+                # put two days on one Monday and the later one went first (2026-10-19).
+                earliest = first_contact_local.date() + timedelta(days=step["day_offset"])
+                if previous_day_date and earliest <= previous_day_date:
+                    earliest = previous_day_date + timedelta(days=1)
+                base = cadence_day_time(settings, earliest, first_contact_local.time())
+            previous_day_date = base.astimezone(clinic_tz).date()
             base_by_day[step["day_offset"]] = base
         scheduled_for = base_by_day[step["day_offset"]] + gap
         if accelerated and previous and scheduled_for < previous:
