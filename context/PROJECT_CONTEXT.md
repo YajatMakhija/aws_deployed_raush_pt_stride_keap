@@ -2116,3 +2116,8 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - `scripts/make-demo-env.sh` builds the server `.env` from the old demo settings on the server itself (no secret
   leaves the box). It turns Sheet, Stride import and Keap sync off for the first start: the old settings still
   carry the clinic number, which production owns. Only `api` + `caddy` run until the demo has test numbers.
+
+### 2026-10-20 — Booking agent: new callback hours and holidays
+- Demo booking agent `7e4d63e1` prompt (`config/vapi_booking_assistant_prompt.md`) now matches production's
+  callback rules: Mon–Fri 8 AM–7 PM, Sat 8 AM–1:30 PM, no Sunday, clinic holidays to end of 2027
+  (`close_min` 810 on Saturday, 1140 otherwise). Only the prompt changed (diffed). 8/8 chat tests pass.
