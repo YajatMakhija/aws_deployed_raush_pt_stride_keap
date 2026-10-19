@@ -289,6 +289,15 @@ with eligible as (
    and (now() at time zone coalesce(l.timezone,p.timezone))::time
        < ((ps.business_hours -> to_char(now() at time zone coalesce(l.timezone,p.timezone),'ID')) ->> 'close')::time
  ))
+ -- A holiday closes the whole day (or from its 'close' time). Planning already skips holidays,
+ -- but a step held back by a pause, a daily limit or a retry could still go out on one.
+ and ((%(test_mode)s and l.is_test) or not exists(
+   select 1 from jsonb_array_elements(coalesce(ps.holidays,'[]'::jsonb)) h
+   where coalesce(h->>'date', h#>>'{}')
+         = to_char(now() at time zone coalesce(l.timezone,p.timezone),'YYYY-MM-DD')
+   and (h->>'close' is null
+        or (now() at time zone coalesce(l.timezone,p.timezone))::time >= (h->>'close')::time)
+ ))
  and ((%(test_mode)s and l.is_test) or (
    oe.channel<>'call' or (
      select count(*) from outreach_events day_event
