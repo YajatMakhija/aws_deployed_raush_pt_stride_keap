@@ -17,7 +17,7 @@ insert into public.keap_appointment_types
    completed_tag_id, date_field_id, time_field_id, clinician_field_id)
 select p.id, v.type_id, v.label, v.booked, v.male, v.done, '6', '8', '10'
 from public.practices p,
-  (values (1, 'Follow-up',          '184', null,  '176'),  -- PT Appt Booked / PT Appt Completed
+  (values (1, 'PT',                 '184', null,  '176'),  -- PT Appt Booked / PT Appt Completed
           (5, 'PT Premium',         '166', null,  '164'),  -- PT Premium Appt Booked / Completed
           (6, 'Pelvic',             '162', '160', '158'))  -- Pelvic Booked Female / Male; Pelvic Completed
        as v(type_id, label, booked, male, done)

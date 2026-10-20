@@ -233,7 +233,7 @@ def chain(request, monkeypatch, tmp_path):
         row = appointment(str(aid), str(pid), str(pid + 5), day(offset), start, end, status,
                           modified=mod or modified(), action=action)
         row.update({"Appointment Type Id": str(type_id), "Primary Attendee Name": clinician,
-                    "Appointment Type": {1: "Follow-up", 2: "Initial Evaluation",
+                    "Appointment Type": {1: "PT", 2: "Initial Evaluation",
                                          3: "Progress Note"}.get(type_id, "Other")})
         drop("appointments", APPOINTMENT_HEADER, [row])
         return aid

@@ -54,7 +54,7 @@ HEADERS = {
     "Place of Service,Location Id,Location Name,Primary Attendee Id,Primary Attendee Name,Details,"
     "Created Date Time,Modified Date Time,Action",
 }
-TYPES = [("1", "Follow-up"), ("2", "Initial Evaluation"), ("3", "Progress Note"),
+TYPES = [("1", "PT"), ("2", "Initial Evaluation"), ("3", "Progress Note"),
          ("5", "PT Premium"), ("6", "Pelvic")]
 FIRST = ["Alpha", "Bravo", "Cyra", "Dax", "Esme", "Finn", "Gia", "Hugo", "Ines", "Jory", "Kai", "Lena"]
 LAST = ["Synth", "Mock", "Sample", "Demo"]

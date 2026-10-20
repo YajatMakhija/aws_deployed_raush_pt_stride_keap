@@ -46,7 +46,7 @@ def env(monkeypatch):
         (practice, PENDING),
     )
     for type_id, label, booked, done in ((2, "Initial Evaluation", "180", "172"),
-                                         (1, "Follow-up", "184", "176")):
+                                         (1, "PT", "184", "176")):
         conn.execute(
             "insert into keap_appointment_types(practice_id,stride_appointment_type_id,label,"
             "booked_tag_id,completed_tag_id,date_field_id,time_field_id,clinician_field_id) "
