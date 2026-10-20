@@ -270,3 +270,55 @@ def test_continue_with_nothing_left_changes_nothing(db):
     assert response.status_code == 409
     assert db["conn"].execute(
         "select 1 from suppressed_numbers where phone_e164=%s", (phone,)).fetchone()
+
+
+def _admin(method, path, body=None, role="super_admin"):
+    client = TestClient(app)
+    headers = {"X-Dashboard-Token": "x" * 32, "X-Dashboard-User-ID": "staff-1",
+               "X-Dashboard-User-Name": "Test%20Admin", "X-Dashboard-User-Role": role}
+    return client.request(method, f"/api/v1/dashboard/{path}", json=body, headers=headers)
+
+
+def test_a_number_whose_lead_was_deleted_can_be_unblocked_from_administration(db):
+    # 2026-10-16: a patient said "don't call me", staff deleted the lead, and the number stayed
+    # blocked with no lead page to unblock it from.
+    phone = _phone()
+    db["conn"].execute("insert into suppressed_numbers(phone_e164,reason,source,list_type) "
+                       "values(%s,'explicit do-not-contact request','vapi','internal')", (phone,))
+    try:
+        listed = _admin("GET", "blocked-numbers")
+        assert listed.status_code == 200, listed.text
+        entry = next(n for n in listed.json()["numbers"] if n["phone"] == phone)
+        assert entry["leads"] == [] and entry["open_lead_id"] is None
+        assert _admin("POST", "blocked-numbers/unblock", {"phone": phone}, role="employee").status_code == 403
+        done = _admin("POST", "blocked-numbers/unblock", {"phone": phone})
+        assert done.status_code == 200, done.text
+        assert not db["conn"].execute("select 1 from suppressed_numbers where phone_e164=%s",
+                                      (phone,)).fetchone()
+        assert _admin("POST", "blocked-numbers/unblock", {"phone": phone}).status_code == 404
+    finally:
+        db["conn"].execute("delete from suppressed_numbers where phone_e164=%s", (phone,))
+        db["conn"].execute("delete from dashboard_audit_log where action='number.unblocked'")
+
+
+def test_an_open_lead_must_be_unblocked_from_its_own_page(db):
+    phone = _phone()
+    lead = _lead(db, phone, status="needs_attention", cadence="paused")
+    db["conn"].execute("insert into suppressed_numbers(phone_e164,reason,source,list_type) "
+                       "values(%s,'explicit do-not-contact request','vapi','internal')", (phone,))
+    entry = next(n for n in _admin("GET", "blocked-numbers").json()["numbers"] if n["phone"] == phone)
+    assert entry["open_lead_id"] == lead
+    refused = _admin("POST", "blocked-numbers/unblock", {"phone": phone})
+    assert refused.status_code == 409 and "lead's page" in refused.json()["detail"]
+
+
+def test_unblocking_a_closed_do_not_contact_number_tells_the_sheet(db):
+    phone = _phone()
+    lead = _lead(db, phone)
+    _sheet_block(db, lead, phone, datetime.now(UTC) - timedelta(days=1))
+    assert _admin("POST", "blocked-numbers/unblock", {"phone": phone}).status_code == 200
+    row = db["conn"].execute("select status,sms_opt_out,call_opt_out from leads where id=%s", (lead,)).fetchone()
+    assert (row["status"], row["sms_opt_out"], row["call_opt_out"]) == ("do_not_contact", False, False)
+    reasons, _ = _snapshot(db, lead)
+    assert "number_unblocked" in reasons
+    db["conn"].execute("delete from dashboard_audit_log where action='number.unblocked'")

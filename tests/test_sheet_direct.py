@@ -193,3 +193,29 @@ def test_sheet_archive_days_zero_is_not_the_default(monkeypatch):
                         lambda grid, days: seen.update(days=days) or [])
     cli.sheet_archive(SimpleNamespace(days=0, apply=False))
     assert seen["days"] == 0
+
+
+def test_a_sheet_update_is_tried_three_times_then_given_up(monkeypatch):
+    from contextlib import contextmanager
+
+    from rpt_agent import sheet_sync_worker
+    from rpt_agent.config import Settings
+
+    statuses = []
+
+    class Conn:
+        def execute(self, sql, params=None):
+            statuses.append("dead" if "status='dead'" in sql else "retry")
+
+    @contextmanager
+    def fake_transaction():
+        yield Conn()
+
+    monkeypatch.setattr(sheet_sync_worker, "transaction", fake_transaction)
+    error = sheet_sync_worker.SheetDeliveryError("Lead ID not found in the Sheet", retryable=True)
+    settings = Settings(_env_file=None)
+    assert settings.sheet_max_attempts == 3
+    # `attempts` is the count before this try: tries 1 and 2 retry, try 3 gives up.
+    for before in (0, 1, 2):
+        sheet_sync_worker._mark_failed([{"id": 1, "attempts": before}], error, settings)
+    assert statuses == ["retry", "retry", "dead"]

@@ -17,7 +17,13 @@ from ..security import DashboardActor, require_dashboard_auth
 from ..services import appointment_views
 from ..services.keap_sync_status import keap_sync_status
 from ..services.lead_stage import stage_of as _stage
-from ..services.number_block import NumberBlockError, block_number, unblock_number
+from ..services.number_block import (
+    NumberBlockError,
+    block_number,
+    blocked_numbers,
+    unblock_number,
+    unblock_number_only,
+)
 from ..services.provider_http import ProviderError
 from ..services.review import (
     REPLACED_REASON,
@@ -132,6 +138,10 @@ class TemplateUpdate(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
+
+
+class UnblockNumber(BaseModel):
+    phone: str = Field(min_length=8, max_length=20, pattern=r"^\+[1-9][0-9]{7,15}$")
 
 
 class ManualSmsRequest(BaseModel):
@@ -921,6 +931,13 @@ def dashboard_lead(lead_id: UUID, actor: Actor):
     }
 
 
+RESUME_REFUSED = {
+    "booked": "A booked lead cannot be resumed",
+    "declined": "This patient declined; the cadence cannot be resumed",
+    "do_not_contact": "A Do Not Contact lead cannot be resumed",
+}
+
+
 @router.post("/leads/{lead_id}/cadence")
 def update_lead_cadence(lead_id: UUID, payload: CadenceAction, actor: Actor):
     with transaction() as conn:
@@ -929,11 +946,25 @@ def update_lead_cadence(lead_id: UUID, payload: CadenceAction, actor: Actor):
         ).fetchone()
         if not lead:
             raise HTTPException(status_code=404, detail="lead not found")
-        if payload.action == "resume" and lead["status"] in {
-            "booked", "declined", "do_not_contact", "invalid_phone"
-        }:
-            raise HTTPException(status_code=409, detail="terminal leads cannot resume cadence")
+        if payload.action == "resume" and lead["status"] in RESUME_REFUSED:
+            raise HTTPException(status_code=409, detail=RESUME_REFUSED[lead["status"]])
         new_state = "paused" if payload.action == "pause" else "active"
+        if payload.action == "resume" and lead["status"] == "invalid_phone":
+            # "Wrong number" pauses the lead for review. Resuming it is staff saying the number
+            # is right after all (2026-10-16: a patient said "wrong number" and the lead was
+            # stuck, since Resume refused it and Restart refuses invalid_phone).
+            conn.execute(
+                "update leads set status='in_progress',needs_review=false,review_reason=null,"
+                "review_resolved_at=case when needs_review then now() else review_resolved_at end,"
+                "status_reason='number confirmed by staff',status_changed_at=now() where id=%s",
+                (lead_id,),
+            )
+            conn.execute(
+                "insert into lead_status_history(lead_id,from_status,to_status,source,reason) "
+                "values(%s,'invalid_phone','in_progress','dashboard','number confirmed by staff, "
+                "cadence resumed')",
+                (lead_id,),
+            )
         shifted = 0
         if payload.action == "pause":
             # Soft cadence_state alone is not enough when a remote worker is stale;
@@ -1254,6 +1285,27 @@ def update_outreach_event(
             str(event_id), {"lead_id": str(lead_id)},
         )
     return {"status": "updated", "scheduled_for": payload.scheduled_for}
+
+
+@router.get("/blocked-numbers")
+def list_blocked_numbers(actor: Actor):
+    """Every blocked number, also those whose lead was deleted (Administration page)."""
+    _require_super_admin(actor)
+    with transaction() as conn:
+        return {"numbers": blocked_numbers(conn)}
+
+
+@router.post("/blocked-numbers/unblock")
+def unblock_blocked_number(payload: UnblockNumber, actor: Actor):
+    _require_super_admin(actor)
+    with transaction() as conn:
+        try:
+            result = unblock_number_only(conn, payload.phone)
+        except NumberBlockError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        _audit(conn, actor, actor.practice_id, "number.unblocked", "phone_number",
+               "…" + payload.phone[-4:], {"leads_released": result["leads_released"]})
+    return result
 
 
 @router.post("/review/{lead_id}/resolve")

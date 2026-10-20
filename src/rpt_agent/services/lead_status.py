@@ -262,6 +262,7 @@ def report_lead_status(
             "do_not_contact": "do_not_contact",
             "booking_link_sent": "booking_link",
             "booking_link": "booking_link",
+            "booking_link_and_transfer": "transferred",
         }.get(normalized, "manual")
         if event:
             conn.execute(
@@ -321,7 +322,11 @@ def report_lead_status(
             record_status(
                 conn, lead_id, lead["status"], "callback_scheduled", source, note or "callback requested"
             )
-        elif normalized == "booking_link":
+        elif normalized in {"booking_link", "booking_link_and_transfer"}:
+            # "Text me the link AND connect me" (2026-10-16: the agent could only pick one and the
+            # patient got no link). The text is marked with_transfer so the transfer status that
+            # follows does not cancel it; a plain change of mind to a transfer still does.
+            with_transfer = normalized == "booking_link_and_transfer"
             settings = conn.execute(
                 "select booking_link_url from practice_settings ps join leads l "
                 "on l.practice_id=ps.practice_id where l.id=%s",
@@ -353,25 +358,53 @@ def report_lead_status(
                     (lead_id, json.dumps({
                         "booking_link_url": settings["booking_link_url"],
                         "call_id": stable_call_id,
+                        **({"with_transfer": True} if with_transfer else {}),
                     })),
                 )
-            elif existing["status"] == "skipped":
+            else:
+                if existing["status"] == "skipped":
+                    conn.execute(
+                        "update notification_log set status='queued',error=null,"
+                        "next_attempt_at=now()+interval '2 minutes',updated_at=now() where id=%s",
+                        (existing["id"],),
+                    )
+                # The latest decision sets whether this call's text survives a transfer.
                 conn.execute(
-                    "update notification_log set status='queued',error=null,"
-                    "next_attempt_at=now()+interval '2 minutes',updated_at=now() where id=%s",
-                    (existing["id"],),
+                    "update notification_log set payload=payload - 'with_transfer' || %s::jsonb,"
+                    "updated_at=now() where id=%s",
+                    (json.dumps({"with_transfer": True} if with_transfer else {}), existing["id"]),
                 )
-            # A booking link is an outcome, not proof of a booking. Keep the
-            # remaining cadence active until staff explicitly marks the lead booked.
-            conn.execute(
-                "update leads set status='booking_link_sent',cadence_state='active',"
-                "last_call_outcome='manual',status_reason=%s,status_changed_at=now() where id=%s",
-                (note or "booking link requested", lead_id),
-            )
-            record_status(
-                conn, lead_id, lead["status"], "booking_link_sent", source, note or "booking link requested"
-            )
+            if with_transfer:
+                conn.execute(
+                    "update leads set status='transferred_human',cadence_state='active',"
+                    "last_call_outcome='transferred',status_reason=%s,status_changed_at=now() where id=%s",
+                    (note or "booking link texted and transferred to staff", lead_id),
+                )
+                record_status(
+                    conn, lead_id, lead["status"], "transferred_human", source,
+                    note or "booking link texted and transferred to staff",
+                )
+            else:
+                # A booking link is an outcome, not proof of a booking. Keep the
+                # remaining cadence active until staff explicitly marks the lead booked.
+                conn.execute(
+                    "update leads set status='booking_link_sent',cadence_state='active',"
+                    "last_call_outcome='manual',status_reason=%s,status_changed_at=now() where id=%s",
+                    (note or "booking link requested", lead_id),
+                )
+                record_status(
+                    conn, lead_id, lead["status"], "booking_link_sent", source,
+                    note or "booking link requested",
+                )
         elif normalized == "transferred_human":
+            # A plain transfer after "link and transfer" in this call is a change of mind: the
+            # queued text loses its with_transfer mark, so the sender drops it.
+            conn.execute(
+                "update notification_log set payload=payload - 'with_transfer',updated_at=now() "
+                "where lead_id=%s and notification_type='sms_booking_link' and status='queued' "
+                "and payload->>'call_id'=%s",
+                (lead_id, stable_call_id),
+            )
             # Record the handoff, but only an explicit staff booking closes cadence.
             conn.execute(
                 "update leads set status='transferred_human',cadence_state='active',"

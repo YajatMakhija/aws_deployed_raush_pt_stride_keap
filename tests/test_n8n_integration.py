@@ -924,6 +924,10 @@ def test_restart_refuses_terminal_or_unsafe_leads(status):
         )
 
     assert exc_info.value.code == "restart_not_allowed"
+    # Name the real reason, not both (user request 2026-10-16).
+    expected = {"do_not_contact": "A Do Not Contact lead cannot be restarted",
+                "invalid_phone": "An invalid phone lead cannot be restarted"}[status]
+    assert exc_info.value.detail == expected
 
 
 def test_restart_rejects_a_repeat_sheet_restart_within_cooldown(monkeypatch):

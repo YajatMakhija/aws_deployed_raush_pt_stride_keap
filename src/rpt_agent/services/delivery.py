@@ -16,11 +16,13 @@ from .sheet_sync import dashboard_call_link, enqueue_sheet_update
 # The patient's last word on the call wins. A booking link waits two minutes
 # after it is requested; if by then the lead is no longer booking_link_sent
 # (they declined, asked for a callback, were transferred, or staff changed the
-# lead) the text is never sent.
+# lead) the text is never sent. The one exception: a patient who asked for the
+# link AND a person (with_transfer) keeps the text while the lead is transferred.
 CANCEL_CHANGED_BOOKING_LINK_SQL = (
     "update notification_log n set status='skipped',error=%s,updated_at=now() "
     "from leads l where n.lead_id=l.id and n.status='queued' "
-    "and n.notification_type='sms_booking_link' and l.status<>'booking_link_sent'"
+    "and n.notification_type='sms_booking_link' and l.status<>'booking_link_sent' "
+    "and not (l.status='transferred_human' and coalesce(n.payload->>'with_transfer','')='true')"
 )
 
 

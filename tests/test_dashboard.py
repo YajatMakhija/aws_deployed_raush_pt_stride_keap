@@ -1567,3 +1567,70 @@ def test_adding_a_lead_in_the_dashboard_is_off_by_default(monkeypatch):
     assert response.status_code == 403
     assert "Google Sheet" in response.json()["detail"]
     get_settings.cache_clear()
+
+
+class ResumeConnection:
+    def __init__(self, status):
+        self.lead = {"id": uuid4(), "practice_id": 1, "status": status, "cadence_state": "paused"}
+        self.statements: list[str] = []
+
+    def execute(self, sql, params=None):
+        del params
+        normal = " ".join(sql.split())
+        self.statements.append(normal)
+        if normal.startswith("select id,practice_id,status,cadence_state from leads"):
+            return Result([dict(self.lead)])
+        return Result([])
+
+
+def _resume(connection, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_API_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+
+    @contextmanager
+    def fake_transaction():
+        yield connection
+
+    monkeypatch.setattr(dashboard_routes, "transaction", fake_transaction)
+    monkeypatch.setattr(dashboard_routes, "restore_pause_skipped", lambda *a, **k: 0)
+    response = TestClient(app).post(
+        f"/api/v1/dashboard/leads/{connection.lead['id']}/cadence",
+        json={"action": "resume"},
+        headers={
+            "X-Dashboard-Token": "x" * 32,
+            "X-Dashboard-User-ID": "staff-1",
+            "X-Dashboard-User-Name": "Test%20Administrator",
+            "X-Dashboard-User-Role": "super_admin",
+        },
+    )
+    get_settings.cache_clear()
+    return response
+
+
+def test_resuming_a_wrong_number_lead_confirms_the_number(monkeypatch):
+    """2026-10-16: a patient said "wrong number", the lead paused for review, and Resume
+    answered "terminal leads cannot resume cadence". Restart refuses invalid_phone too, so
+    the lead was stuck. Resume now means staff confirmed the number."""
+    connection = ResumeConnection("invalid_phone")
+    response = _resume(connection, monkeypatch)
+
+    assert response.status_code == 200
+    fix = next(sql for sql in connection.statements if sql.startswith("update leads set status='in_progress'"))
+    assert "needs_review=false" in fix
+    assert any("insert into lead_status_history" in sql and "'invalid_phone','in_progress'" in sql
+               for sql in connection.statements)
+    assert any(sql.startswith("update leads set cadence_state=") for sql in connection.statements)
+
+
+@pytest.mark.parametrize(("status", "message"), [
+    ("booked", "A booked lead cannot be resumed"),
+    ("declined", "This patient declined; the cadence cannot be resumed"),
+    ("do_not_contact", "A Do Not Contact lead cannot be resumed"),
+])
+def test_resume_refuses_finished_leads_with_a_plain_reason(monkeypatch, status, message):
+    connection = ResumeConnection(status)
+    response = _resume(connection, monkeypatch)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == message
+    assert not any(sql.startswith("update") for sql in connection.statements)

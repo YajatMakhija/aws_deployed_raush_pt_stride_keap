@@ -61,6 +61,8 @@ RESULT_LABELS = {
     "do_not_contact_applied": ("Do Not Contact applied", "Do not outreach"),
     "booked_applied": ("Booked", "Booked"),
     "already_booked": ("Already booked", "Booked"),
+    # Lead created (or restarted) but its number is blocked: nothing goes out until an admin unblocks.
+    "number_blocked_needs_review": ("Number blocked; needs review", "Needs Review"),
 }
 REVIEW_LABELS = {
     "phone_changed_needs_review": "Phone number changed; needs review",

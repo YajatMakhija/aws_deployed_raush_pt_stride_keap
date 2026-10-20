@@ -129,7 +129,7 @@ def _mark_failed(
     with transaction() as conn:
         for row in rows:
             attempt = int(row["attempts"]) + 1
-            if error.retryable and attempt < settings.retry_max_attempts:
+            if error.retryable and attempt < settings.sheet_max_attempts:
                 delay = retry_delay_seconds(attempt, error.retry_after_seconds, settings)
                 conn.execute(
                     "update integration_outbox set status='pending',last_error=%s,"

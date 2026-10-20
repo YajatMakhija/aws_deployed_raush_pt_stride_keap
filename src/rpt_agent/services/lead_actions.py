@@ -25,12 +25,28 @@ TERMINAL_START_STATUSES = {
     "closed_no_response",
 }
 RESTART_COOLDOWN_MINUTES = 10
+NUMBER_BLOCKED_REASON = "Number blocked: this number asked not to be contacted. Unblock it to start outreach."
 
 
 @dataclass(frozen=True)
 class ActionExecution:
     status_code: int
     body: dict[str, Any]
+
+
+def _hold_if_number_blocked(conn, lead_id: str, phone: str | None) -> bool:
+    """A start or restart on a blocked number must not look like a running cadence.
+
+    The worker never contacts a blocked number, so without this the lead sat "In cadence" with
+    nothing going out (seen 2026-10-16: a lead re-added after its number said "don't call me").
+    It goes to Needs Attention instead, where an admin can unblock it and continue.
+    """
+    if not phone or not conn.execute(
+        "select 1 from suppressed_numbers where phone_e164=%s", (phone,)
+    ).fetchone():
+        return False
+    flag_lead_for_review(conn, lead_id, NUMBER_BLOCKED_REASON)
+    return True
 
 
 class LeadActionError(RuntimeError):
@@ -307,6 +323,7 @@ def _start_cadence(
         (lead_id, previous_status),
     )
     warning = hand_over_number(conn, practice_id=practice["id"], phone=phone, lead_id=lead_id)
+    blocked = _hold_if_number_blocked(conn, lead_id, phone)
     enqueue_sheet_update(
         conn,
         lead_id=lead_id,
@@ -321,7 +338,7 @@ def _start_cadence(
             "request_id": str(request_id),
             "lead_id": lead_id,
             "action": "start_cadence",
-            "result": "cadence_started",
+            "result": "number_blocked_needs_review" if blocked else "cadence_started",
             "created": created,
             "cadence_event_count": event_count,
             **({"warning": warning} if warning else {}),
@@ -364,7 +381,8 @@ def _restart_cadence(
         raise LeadActionError(
             409,
             "restart_not_allowed",
-            "A Do Not Contact or invalid-phone lead cannot be restarted",
+            "An invalid phone lead cannot be restarted" if lead["status"] == "invalid_phone"
+            else "A Do Not Contact lead cannot be restarted",
             lead_id=str(lead_id),
         )
     # Booked may be restarted: a mis-clicked Booked needs an undo, and marking
@@ -438,6 +456,7 @@ def _restart_cadence(
     warning = hand_over_number(
         conn, practice_id=practice["id"], phone=lead["phone_e164"], lead_id=str(lead_id)
     )
+    blocked = _hold_if_number_blocked(conn, str(lead_id), lead["phone_e164"])
     enqueue_sheet_update(
         conn,
         lead_id=str(lead_id),
@@ -451,7 +470,7 @@ def _restart_cadence(
             "request_id": str(request_id),
             "lead_id": str(lead_id),
             "action": "restart_cadence",
-            "result": "cadence_restarted",
+            "result": "number_blocked_needs_review" if blocked else "cadence_restarted",
             "created": False,
             "cadence_event_count": event_count,
             **({"warning": warning} if warning else {}),

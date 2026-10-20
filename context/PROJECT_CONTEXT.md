@@ -2121,3 +2121,14 @@ known follow-up. Do not include secrets or patient/tester identifiers.
 - Demo booking agent `7e4d63e1` prompt (`config/vapi_booking_assistant_prompt.md`) now matches production's
   callback rules: Mon–Fri 8 AM–7 PM, Sat 8 AM–1:30 PM, no Sunday, clinic holidays to end of 2027
   (`close_min` 810 on Saturday, 1140 otherwise). Only the prompt changed (diffed). 8/8 chat tests pass.
+
+### 2026-10-20 — Production fixes ported to the demo
+From production (`fc7a339`, `d5314cf`, `ac95599`, `1e951b8`), adapted to the demo code:
+- Sheet updates give up after 3 tries (`SHEET_MAX_ATTEMPTS`, was `RETRY_MAX_ATTEMPTS` = 5).
+- Wrong-number (invalid_phone) leads can be resumed by staff; Restart refusals name the real reason.
+- Blocked numbers: a new Sheet row on a suppressed number goes to Needs Review ("Number blocked") instead
+  of an idle cadence; `GET /dashboard/blocked-numbers` + `POST /dashboard/blocked-numbers/unblock` (admin)
+  feed the Administration "Blocked numbers" panel (frontend).
+- New lead-status value `booking_link_and_transfer`: the link text is kept while the call is transferred.
+- Test isolation: the link-and-transfer DB test counts only its own practice's texts (the demo schema's
+  booking suites leave confirmation texts in the shared test DB). DB tests need practice id 1 to exist.

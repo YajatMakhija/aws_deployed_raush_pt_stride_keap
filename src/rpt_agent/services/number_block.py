@@ -174,3 +174,62 @@ def unblock_number(conn, lead: dict, after: AfterUnblock, staff_name: str) -> di
         if other["status"] == "do_not_contact":
             _sheet_update(conn, str(other["id"]), "number_unblocked")
     return {"after_unblock": after, "resumed_steps": len(remaining)}
+
+
+OPEN_CADENCE_STATES = ("pending", "active", "paused")
+
+
+def blocked_numbers(conn) -> list[dict]:
+    """Every blocked number, newest first, with the leads that use it (if any are left)."""
+    rows = conn.execute(
+        "select s.phone_e164,s.reason,s.source,s.created_at,"
+        "coalesce((select json_agg(json_build_object('id',l.id,'full_name',l.full_name,'status',l.status,"
+        "'cadence_state',l.cadence_state,'needs_review',l.needs_review) order by l.created_at desc) "
+        "from leads l where l.phone_e164=s.phone_e164),'[]'::json) as leads "
+        "from suppressed_numbers s order by s.created_at desc limit 500"
+    ).fetchall()
+    out = []
+    for row in rows:
+        leads = row["leads"] or []
+        open_lead = next((lead for lead in leads if lead["status"] != "do_not_contact"
+                          and lead["cadence_state"] in OPEN_CADENCE_STATES), None)
+        out.append({
+            "phone": row["phone_e164"], "reason": row["reason"], "source": row["source"],
+            "blocked_at": row["created_at"], "leads": leads,
+            # An open lead is unblocked from its own page, where staff choose continue or start over.
+            "open_lead_id": open_lead["id"] if open_lead else None,
+        })
+    return out
+
+
+def unblock_number_only(conn, phone: str) -> dict:
+    """Release a blocked number that has no open lead (e.g. the lead was deleted).
+
+    Nothing is called or texted by this: the next Sheet "Start cadence" on the number starts
+    normally. Older Do Not Contact leads on it stay closed; the Sheet is told they are unblocked
+    so a stale Do Not Contact cell is not sent again.
+    """
+    block = conn.execute(
+        "select phone_e164 from suppressed_numbers where phone_e164=%s for update", (phone,)
+    ).fetchone()
+    if not block:
+        raise NumberBlockError(404, "this number is not blocked")
+    open_lead = conn.execute(
+        "select id from leads where phone_e164=%s and status<>'do_not_contact' "
+        "and cadence_state = any(%s) limit 1",
+        (phone, list(OPEN_CADENCE_STATES)),
+    ).fetchone()
+    if open_lead:
+        raise NumberBlockError(
+            409, "this number belongs to an open lead: unblock it from the lead's page, where you "
+                 "choose continue or start over",
+        )
+    conn.execute("delete from suppressed_numbers where phone_e164=%s", (phone,))
+    released = conn.execute(
+        "update leads set call_opt_out=false,sms_opt_out=false where phone_e164=%s returning id,status",
+        (phone,),
+    ).fetchall()
+    for lead in released:
+        if lead["status"] == "do_not_contact":
+            _sheet_update(conn, str(lead["id"]), "number_unblocked")
+    return {"unblocked": True, "leads_released": len(released)}

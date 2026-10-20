@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     sheet_settle_seconds: int = Field(default=60, ge=0, le=3600)
     # Commands started per poll; the rest of a big pasted block waits for the next polls.
     sheet_max_commands_per_poll: int = Field(default=50, ge=1, le=1000)
+    # Tries for one Sheet update (e.g. its row was deleted) before it is given up as dead:
+    # the first try plus two retries, about 1 and 2 minutes apart.
+    sheet_max_attempts: int = Field(default=3, ge=1, le=20)
     # Nightly archive: rows of finished leads (booked, do not contact, declined, closed, wrong
     # number, or cadence over) untouched for SHEET_ARCHIVE_DAYS move to the archive tab at
     # SHEET_ARCHIVE_HOUR (Pacific). Off until the clinic agrees.

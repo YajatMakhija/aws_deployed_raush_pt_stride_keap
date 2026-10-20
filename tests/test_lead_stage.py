@@ -22,6 +22,8 @@ def _lead(status="in_progress", cadence="active", review=False, total=4, next_ev
     (_lead(status="do_not_contact", cadence="terminated"), "closed", "Do not outreach"),
     (_lead(status="declined", cadence="terminated"), "closed", "Closed"),
     (_lead(status="invalid_phone"), "closed", "Closed"),
+    (_lead(status="closed_no_response", cadence="completed"), "closed", "Closed"),  # 14 days done
+    (_lead(status="declined", cadence="terminated", next_event=None), "closed", "Closed"),  # not interested
     (_lead(next_event=None), "closed", "Closed"),          # every step done: spent
     (_lead(cadence="paused", next_event=None), "cadence", "Paused"),  # paused is on hold, not spent
 ])

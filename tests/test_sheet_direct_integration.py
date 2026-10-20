@@ -224,6 +224,25 @@ def test_call_results_are_written_into_the_leads_row(env):
     assert status["status"] == "delivered"
 
 
+def test_a_new_row_on_a_blocked_number_goes_to_review_not_into_cadence(env):
+    # 2026-10-16: a lead re-added on a number that had said "don't call me" showed In cadence
+    # while nothing could go out. It must show as Needs Review with the reason instead.
+    phone = _phone()
+    env.db.execute("insert into suppressed_numbers(phone_e164,reason,source,list_type) "
+                   "values(%s,'explicit do-not-contact request','test','internal')", ("+1" + phone,))
+    number = env.start_row(phone=phone)
+    env.tick()
+    assert env.cell(number, "outcome_status") == "Number blocked; needs review"
+    lead = env.lead(env.cell(number, "lead_id"))
+    assert (lead["status"], lead["cadence_state"], lead["needs_review"]) == ("needs_attention", "paused", True)
+    assert "Number blocked" in lead["review_reason"]
+    planned = env.db.execute("select count(*) as n from outreach_events where lead_id=%s and status='planned'",
+                             (lead["id"],)).fetchone()["n"]
+    assert planned == 0
+    env.tick()
+    assert env.cell(number, "lead_status") == "Needs Review"
+
+
 def test_a_result_for_a_lead_missing_from_the_sheet_is_retried_not_lost(env):
     number = env.start_row()
     env.tick()
