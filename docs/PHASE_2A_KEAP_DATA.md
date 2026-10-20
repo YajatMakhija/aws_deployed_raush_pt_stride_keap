@@ -129,7 +129,9 @@ in section 11. Then show the developer the changed sections and wait for "go" be
 New Evaluation Booked; Re-Eval Booked; POC Appt Booked / PT Completed their POC; PT Premium Appt Booked /
 Completed; Pelvic Appt Booked - Female / - Male and Pelvic Appt Completed. Pelvic is its own Stride type;
 the Male tag goes in `keap_appointment_types.male_booked_tag_id` (migration 046) and is used when the
-Stride patient's gender is `M`/`Male`.
+Stride patient's gender is `M`/`Male`. **For now Initial Evaluation, Re-Evaluation and Plan of Care (POC)
+are not handled** (client, 2026-10-20): they are left out of the mapping, so New Evaluation Booked,
+Re-Eval Booked, POC Appt Booked and PT Completed their POC are never applied.
 
 **Still open:** C2-C13 walkthrough, exact `contact_type` string for Lead, whether DNC/Closed get tags, real Rausch appointment types.
 

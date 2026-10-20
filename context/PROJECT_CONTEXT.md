@@ -2149,13 +2149,19 @@ From production (`fc7a339`, `d5314cf`, `ac95599`, `1e951b8`), adapted to the dem
 - Migration `046_keap_male_booked_tag.sql`: `keap_appointment_types.male_booked_tag_id`. A patient whose
   Stride gender is `M`/`Male` gets it instead of `booked_tag_id`; anyone else (including unknown gender)
   gets `booked_tag_id`. Owned, so a cancel removes either. Not applied to any DB yet.
-- Sandbox tag ids (`supabase/dev/keap_sandbox_mapping.sql`, mock Stride types 1-6 in
-  `scripts/fake_stride.py`): New Evaluation 180; PT Appt 184 / 176; POC 174 / PT Completed their POC 156;
-  Re-Eval 178; PT Premium 166 / 164; Pelvic 162 (Female) / 160 (Male) / 158. No Completed tag for New
-  Evaluation or Re-Eval (none in the admin's list; the old sandbox pairing used 172 Eval Completed).
-- Tests: `test_every_admin_tag_on_book_complete_and_cancel` (unit, every tag booked / checked in /
-  cancelled), `test_a_pelvic_booking_gets_the_tag_for_the_patients_sex` (chain: Stride CSV gender -> fake
-  Keap). `tests/fake_keap.py` knows every admin tag. All 157 Keap tests pass on a local Postgres.
+- Sandbox tag ids (`supabase/dev/keap_sandbox_mapping.sql`, mock Stride types in
+  `scripts/fake_stride.py`): PT Appt 184 / 176; PT Premium 166 / 164; Pelvic 162 (Female) / 160 (Male) / 158.
+- Initial Evaluation, Re-Evaluation and Plan of Care (POC) are NOT handled for now (client): not mapped,
+  so they get no Booked/Completed tag; the mapping file switches off any row with tag 180 (New Evaluation
+  Booked), 178 (Re-Eval Booked) or 174 (POC Appt Booked; its Completed tag 156 goes with it). The demo DB
+  still has 1452 Initial Evaluation -> 180 / 172 and 1453 Progress Note -> 174 / 156 active until that file
+  is run there. NB the demo voice agent books every case as 1452, so once it is off, a voice booking removes
+  Pending and adds no tag (E-09).
+- Tests: `test_every_admin_tag_on_book_complete_and_cancel`,
+  `test_evaluation_re_evaluation_and_poc_get_no_keap_tag` (unit),
+  `test_pending_then_booked_then_completed_for_each_appointment_type` (chain: Sheet -> Stride CSV with
+  gender -> fake Keap, per type). `tests/fake_keap.py` knows every admin tag. All Keap tests pass on a
+  local Postgres.
 - Windows note: the `pgserver` embedded Postgres has no time-zone data, so 14 clinic-hours / Stride status
   DB tests fail there ("time zone America/Los_Angeles not recognized"); unrelated to Keap.
 - Still needed: Rausch's real Stride appointment type ids, and production Keap tag ids before production.
