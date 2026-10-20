@@ -1,7 +1,8 @@
--- Keap SANDBOX (puq284) mapping for the three mock Stride appointment types.
+-- Keap SANDBOX (puq284) mapping for the mock Stride appointment types (scripts/fake_stride.py TYPES).
 -- Tag and field ids come from `rpt keap-discover` against the sandbox; the client's
 -- production Keap has different ids, so never reuse this file there.
--- Draft pairing of Stride types to Michelle's STATUS tags, to be confirmed by her.
+-- Tag pairing from the Keap admin's list (2026-10-20); the Stride type ids are mocks until
+-- Rausch's real appointment types are known. Needs migration 046 (male_booked_tag_id).
 update public.practice_settings set
   keap_pending_tag_id = '144',          -- Pending
   keap_gave_up_tag_id = '186',          -- STATUS: AI Gave Up
@@ -10,17 +11,21 @@ update public.practice_settings set
 where practice_id = (select id from public.practices where slug = 'rausch-pt');
 
 insert into public.keap_appointment_types
-  (practice_id, stride_appointment_type_id, label, booked_tag_id, completed_tag_id,
-   date_field_id, time_field_id, clinician_field_id)
-select p.id, v.type_id, v.label, v.booked, v.done, '6', '8', '10'
+  (practice_id, stride_appointment_type_id, label, booked_tag_id, male_booked_tag_id,
+   completed_tag_id, date_field_id, time_field_id, clinician_field_id)
+select p.id, v.type_id, v.label, v.booked, v.male, v.done, '6', '8', '10'
 from public.practices p,
-  (values (2, 'Initial Evaluation', '180', '172'),   -- New Evaluation Booked / Eval Completed
-          (1, 'Follow-up',          '184', '176'),   -- PT Appt Booked / PT Appt Completed
-          (3, 'Progress Note',      '174', '156'))   -- POC Appt Booked / PT Completed their POC
-       as v(type_id, label, booked, done)
+  (values (2, 'Initial Evaluation', '180', null,  null),   -- New Evaluation Booked
+          (1, 'Follow-up',          '184', null,  '176'),  -- PT Appt Booked / PT Appt Completed
+          (3, 'Progress Note',      '174', null,  '156'),  -- POC Appt Booked / PT Completed their POC
+          (4, 'Re-Evaluation',      '178', null,  null),   -- Re-Eval Booked
+          (5, 'PT Premium',         '166', null,  '164'),  -- PT Premium Appt Booked / Completed
+          (6, 'Pelvic',             '162', '160', '158'))  -- Pelvic Booked Female / Male; Pelvic Completed
+       as v(type_id, label, booked, male, done)
 where p.slug = 'rausch-pt'
 on conflict (practice_id, stride_appointment_type_id) do update set
   label = excluded.label, booked_tag_id = excluded.booked_tag_id,
+  male_booked_tag_id = excluded.male_booked_tag_id,
   completed_tag_id = excluded.completed_tag_id, date_field_id = excluded.date_field_id,
   time_field_id = excluded.time_field_id, clinician_field_id = excluded.clinician_field_id,
   is_active = true;

@@ -242,9 +242,11 @@ def compute_desired(
     # --- tags ---
     pending_tag = settings.get("keap_pending_tag_id")
     gave_up_tag = settings.get("keap_gave_up_tag_id")
+    is_male = (p.get("gender") or "").strip().lower() in {"m", "male"}
     tags: set[str] = set()
     for a in tag_pool:
-        tags.add(str(by_type[a["appointment_type_id"]]["booked_tag_id"]))
+        m = by_type[a["appointment_type_id"]]
+        tags.add(str((is_male and m.get("male_booked_tag_id")) or m["booked_tag_id"]))
     for a in live:
         completed = by_type[a["appointment_type_id"]].get("completed_tag_id")
         if completed and (a.get("status") or "").strip().lower() in CHECKED_IN_STATUSES:
@@ -263,6 +265,8 @@ def compute_desired(
     owned_tags = {str(t) for t in (pending_tag, gave_up_tag) if t}
     for m in mapping:
         owned_tags.add(str(m["booked_tag_id"]))
+        if m.get("male_booked_tag_id"):
+            owned_tags.add(str(m["male_booked_tag_id"]))
         if m.get("completed_tag_id"):
             owned_tags.add(str(m["completed_tag_id"]))
 
@@ -444,7 +448,7 @@ def _load_context(conn, practice_id, rows, settings, mapping):
         for r in conn.execute(
             "select stride_id,first_name,last_name,date_of_birth,personal_email,work_email,"
             "preferred_email,mobile_phone,home_phone,work_phone,preferred_phone,address_1,"
-            "address_2,city,state,zip,deleted_at from stride_patients "
+            "address_2,city,state,zip,gender,deleted_at from stride_patients "
             "where practice_id=%s and stride_id=any(%s)",
             (practice_id, patient_ids),
         )

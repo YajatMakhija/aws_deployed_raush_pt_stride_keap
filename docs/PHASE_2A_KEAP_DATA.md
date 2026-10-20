@@ -125,6 +125,12 @@ in section 11. Then show the developer the changed sections and wait for "go" be
 - Do not touch sandbox contacts 204 and 206.
 - Test leads: `KEAP_INCLUDE_TEST_LEADS=true` in the sandbox only.
 
+**2026-10-20, Keap admin's tag list:** one Booked (and where listed, Completed) tag per appointment type:
+New Evaluation Booked; Re-Eval Booked; POC Appt Booked / PT Completed their POC; PT Premium Appt Booked /
+Completed; Pelvic Appt Booked - Female / - Male and Pelvic Appt Completed. Pelvic is its own Stride type;
+the Male tag goes in `keap_appointment_types.male_booked_tag_id` (migration 046) and is used when the
+Stride patient's gender is `M`/`Male`.
+
 **Still open:** C2-C13 walkthrough, exact `contact_type` string for Lead, whether DNC/Closed get tags, real Rausch appointment types.
 
 ## 3. Business rules (DRAFT — replace with the answers from section 0)

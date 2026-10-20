@@ -2141,3 +2141,21 @@ From production (`fc7a339`, `d5314cf`, `ac95599`, `1e951b8`), adapted to the dem
 - Twilio webhooks are accepted when signed by either account's token (the US number is its own account).
 - `KEAP_HANDOFF_MODE` is the new name of `KEAP_MODE` (old Keap handoff webhook only; the contact sync is
   `KEAP_SYNC_ENABLED`). `KEAP_MODE` still works. Tests: `tests/test_us_test_numbers.py`.
+
+### 2026-10-20 — Keap: pelvic Booked tag by sex
+- Keap admin's tag list: one tag per Stride appointment type (New Evaluation, Re-Eval, POC, PT Premium,
+  Pelvic), applied on booking and on completion (Stride "Checked In"); tags still come off on a cancel.
+  Pelvic has two Booked tags (Female / Male) and one Completed tag.
+- Migration `046_keap_male_booked_tag.sql`: `keap_appointment_types.male_booked_tag_id`. A patient whose
+  Stride gender is `M`/`Male` gets it instead of `booked_tag_id`; anyone else (including unknown gender)
+  gets `booked_tag_id`. Owned, so a cancel removes either. Not applied to any DB yet.
+- Sandbox tag ids (`supabase/dev/keap_sandbox_mapping.sql`, mock Stride types 1-6 in
+  `scripts/fake_stride.py`): New Evaluation 180; PT Appt 184 / 176; POC 174 / PT Completed their POC 156;
+  Re-Eval 178; PT Premium 166 / 164; Pelvic 162 (Female) / 160 (Male) / 158. No Completed tag for New
+  Evaluation or Re-Eval (none in the admin's list; the old sandbox pairing used 172 Eval Completed).
+- Tests: `test_every_admin_tag_on_book_complete_and_cancel` (unit, every tag booked / checked in /
+  cancelled), `test_a_pelvic_booking_gets_the_tag_for_the_patients_sex` (chain: Stride CSV gender -> fake
+  Keap). `tests/fake_keap.py` knows every admin tag. All 157 Keap tests pass on a local Postgres.
+- Windows note: the `pgserver` embedded Postgres has no time-zone data, so 14 clinic-hours / Stride status
+  DB tests fail there ("time zone America/Los_Angeles not recognized"); unrelated to Keap.
+- Still needed: Rausch's real Stride appointment type ids, and production Keap tag ids before production.

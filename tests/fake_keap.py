@@ -23,6 +23,10 @@ class FakeKeap:
         self.contacts: dict[str, dict[str, Any]] = {}
         self.tags = {"144": "Pending", "180": "New Evaluation Booked", "172": "Eval Completed",
                      "184": "PT Appt Booked", "176": "PT Appt Completed", "186": "AI Gave Up",
+                     "174": "POC Appt Booked", "156": "PT Completed their POC",
+                     "178": "Re-Eval Booked", "166": "PT Premium Appt Booked",
+                     "164": "PT Premium Appt Completed", "162": "Pelvic Appt Booked - Female",
+                     "160": "Pelvic Appt Booked - Male", "158": "Pelvic Appt Completed",
                      "999": "Clinic's own tag"}
         self.custom_fields = {"6": "DATE", "8": "TEXT", "10": "TEXT", "4": "TEXT_AREA"}
         self.requests: list[tuple[str, str]] = []
