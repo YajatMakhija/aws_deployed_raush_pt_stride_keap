@@ -362,7 +362,9 @@ def claim_jobs(trace: WorkflowTrace, limit: int = 20) -> list[Job]:
                 row["id"], str(row["lead_id"]), row["channel"], context["phone_e164"],
                 context["full_name"], context["body"], context["booking_link_url"], row["day_offset"],
                 context["vapi_assistant_id"] or get_settings().vapi_assistant_id,
-                context["vapi_phone_number_id"] or get_settings().vapi_phone_number_id,
+                get_settings().vapi_phone_number_for(
+                    context["phone_e164"], context["vapi_phone_number_id"] or get_settings().vapi_phone_number_id
+                ),
                 row["attempt_no"],
                 context["date_of_birth"],
                 context["stride_case_title"],

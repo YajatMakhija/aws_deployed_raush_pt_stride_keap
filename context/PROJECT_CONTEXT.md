@@ -2132,3 +2132,12 @@ From production (`fc7a339`, `d5314cf`, `ac95599`, `1e951b8`), adapted to the dem
 - New lead-status value `booking_link_and_transfer`: the link text is kept while the call is transferred.
 - Test isolation: the link-and-transfer DB test counts only its own practice's texts (the demo schema's
   booking suites leave confirmation texts in the shared test DB). DB tests need practice id 1 to exist.
+
+### 2026-10-20 — US test numbers; KEAP_MODE renamed KEAP_HANDOFF_MODE
+- Optional `US_VAPI_PHONE_NUMBER_ID`, `US_TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM_NUMBER`: a lead whose phone starts
+  with `+1` is called (worker) and texted (every SMS goes through `TwilioService.send_sms`) from the US numbers;
+  everyone else, and everyone while they are empty, uses the default numbers. Calls: the US Vapi id wins over
+  `practice_settings.vapi_phone_number_id`. Texts: used only when all three Twilio values are set.
+- Twilio webhooks are accepted when signed by either account's token (the US number is its own account).
+- `KEAP_HANDOFF_MODE` is the new name of `KEAP_MODE` (old Keap handoff webhook only; the contact sync is
+  `KEAP_SYNC_ENABLED`). `KEAP_MODE` still works. Tests: `tests/test_us_test_numbers.py`.

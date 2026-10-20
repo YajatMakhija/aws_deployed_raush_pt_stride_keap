@@ -3,7 +3,7 @@ from functools import cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,7 +18,12 @@ class Settings(BaseSettings):
     vapi_mode: str | None = None
     twilio_mode: str | None = None
     stride_mode: str | None = None
-    keap_mode: str | None = None
+    # Mode of the old Keap *handoff* webhook only (keap_service.py), not the Keap contact sync, which is
+    # switched by KEAP_SYNC_ENABLED. Named KEAP_HANDOFF_MODE since 2026-10-20 because KEAP_MODE=mock read as
+    # "Keap is off"; the old name is still accepted.
+    keap_mode: str | None = Field(
+        default=None, validation_alias=AliasChoices("KEAP_HANDOFF_MODE", "KEAP_MODE", "keap_mode")
+    )
     mock_base_url: str = "http://localhost:9000"
     api_base_url: str = "http://localhost:8000"
     public_base_url: str = ""
@@ -127,6 +132,13 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_from_number: str = "+15550000001"
     twilio_base_url: str = "https://api.twilio.com"
+    # Demo testing (2026-10-20): US test numbers. A lead whose phone starts with +1 is called from the US
+    # Vapi number and texted from the US Twilio number (its own Twilio account) when these are set; every
+    # other lead, and every lead while they are empty, uses the numbers above. Production leaves them empty.
+    us_vapi_phone_number_id: str = ""
+    us_twilio_account_sid: str = ""
+    us_twilio_auth_token: str = ""
+    us_twilio_from_number: str = ""
     stride_base_url: str = "https://demo.stridethera.com"
     stride_api_token: str = ""
     slot_token_secret: str = Field(default="local-slot-secret", min_length=8)
@@ -173,6 +185,27 @@ class Settings(BaseSettings):
     @classmethod
     def _blank_override_is_unset(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
+
+    @staticmethod
+    def is_us_phone(phone: str | None) -> bool:
+        return (phone or "").strip().startswith("+1")
+
+    def vapi_phone_number_for(self, phone: str | None, default: str) -> str:
+        """The Vapi phone number to call this patient from."""
+        if self.us_vapi_phone_number_id and self.is_us_phone(phone):
+            return self.us_vapi_phone_number_id
+        return default
+
+    def twilio_account_for(self, phone: str | None) -> tuple[str, str, str]:
+        """(account sid, auth token, from number) to text this patient from."""
+        us = (self.us_twilio_account_sid, self.us_twilio_auth_token, self.us_twilio_from_number)
+        if all(us) and self.is_us_phone(phone):
+            return us
+        return self.twilio_account_sid, self.twilio_auth_token, self.twilio_from_number
+
+    def twilio_auth_tokens(self) -> list[str]:
+        """Tokens that may sign Twilio webhooks: each account we send from signs its own callbacks."""
+        return [token for token in (self.twilio_auth_token, self.us_twilio_auth_token) if token]
 
     def mode(self, provider: str) -> str:
         override = getattr(self, f"{provider}_mode", None)

@@ -190,11 +190,11 @@ async def require_vapi_auth(request: Request) -> None:
 async def require_twilio_auth(request: Request, form: dict[str, str]) -> None:
     """Validate Twilio's HMAC-SHA1 request signature."""
     settings = get_settings()
-    auth_token = settings.twilio_auth_token
+    auth_tokens = settings.twilio_auth_tokens()
     signature = request.headers.get("x-twilio-signature", "")
     if settings.mode("twilio") == "mock" and signature == "mock-valid":
         return
-    if not auth_token or not signature:
+    if not auth_tokens or not signature:
         raise HTTPException(status_code=401, detail="missing Twilio signature")
     if settings.public_base_url:
         public_url = f"{settings.public_base_url.rstrip('/')}{request.url.path}"
@@ -203,8 +203,10 @@ async def require_twilio_auth(request: Request, form: dict[str, str]) -> None:
     else:
         public_url = str(request.url)
     data = public_url + "".join(f"{key}{form[key]}" for key in sorted(form))
-    digest = base64.b64encode(hmac.new(auth_token.encode(), data.encode(), hashlib.sha1).digest()).decode()
-    if not hmac.compare_digest(digest, signature):
+    # The US test number lives in its own Twilio account, which signs with its own token.
+    digests = [base64.b64encode(hmac.new(token.encode(), data.encode(), hashlib.sha1).digest()).decode()
+               for token in auth_tokens]
+    if not any(hmac.compare_digest(digest, signature) for digest in digests):
         raise HTTPException(status_code=401, detail="invalid Twilio signature")
 
 
